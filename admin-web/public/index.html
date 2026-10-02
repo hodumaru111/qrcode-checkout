@@ -382,6 +382,7 @@
         qr_image: e.qr_image || "",
         message: e.message || "",
         after_close_url: e.after_close_url || "",
+        target_pc: e.target_pc || "",
       }));
     }
     const times = ((data && data.checkout_times) || [data && data.checkout_time]).filter(Boolean);
@@ -419,7 +420,7 @@
   // ---------- 일정 카드 ----------
   function addEntry(data, kind) {
     const d = data || {};
-    const listId = (kind || d0.kind) === "notice" ? "noticeList" : "checkoutList";
+    const listId = kind === "notice" ? "noticeList" : "checkoutList";
     const el = document.createElement("div");
     el.className = "entry";
     el.innerHTML =
@@ -431,6 +432,11 @@
         '<input type="text" class="msg-input" placeholder="화면에 함께 띄울 안내 문구 (선택)" />' +
         '<div style="height:8px"></div>' +
         '<input type="text" class="link-input" placeholder="닫을 때 열릴 링크 (선택)" />' +
+        (listId === "noticeList"
+          ? '<div style="height:8px"></div>' +
+            '<input type="text" class="target-input" placeholder="대상 PC 이름 (선택, 비우면 전체 표시)" />' +
+            '<p class="hint">학생이 check.ps1을 실행하면 뜨는 "이 PC 이름"을 그대로 입력하세요.</p>'
+          : "") +
         '<div class="imgstate"><span class="tag">기본 QR 사용</span>' +
         '<button class="link revert" hidden>기본 QR로</button></div>' +
       '</div>';
@@ -440,6 +446,7 @@
     const time = el.querySelector("input[type=time]");
     const link = el.querySelector(".link-input");
     const msg = el.querySelector(".msg-input");
+    const targetInput = el.querySelector(".target-input");
     const tag = el.querySelector(".tag");
     const revert = el.querySelector(".revert");
 
@@ -476,10 +483,13 @@
         ? "안내 문구 (이미지 없으면 이 문구만 크게 표시)"
         : "화면에 함께 띄울 안내 문구 (선택)";
 
-      tag.textContent = isNotice
+      const targetName = targetInput ? targetInput.value.trim() : "";
+      let tagText = isNotice
         ? (el.qrImage ? "공지 이미지 + 문구" : "문구만 표시")
         : (el.qrImage ? "이 시각 전용 QR" : "기본 QR 사용");
-      tag.className = "tag" + (el.qrImage ? " custom" : "");
+      if (isNotice && targetName) tagText += ` · "${targetName}" 전용`;
+      tag.textContent = tagText;
+      tag.className = "tag" + (el.qrImage || targetName ? " custom" : "");
       revert.hidden = !el.qrImage;
       revert.textContent = isNotice ? "이미지 빼기" : "기본 QR로";
       el.classList.toggle("invalid", !!time.value && !TIME_RE.test(time.value));
@@ -517,6 +527,7 @@
     time.addEventListener("input", () => { paint(); refreshDirty(); });
     link.addEventListener("input", refreshDirty);
     msg.addEventListener("input", refreshDirty);
+    if (targetInput) targetInput.addEventListener("input", () => { paint(); refreshDirty(); });
     el.querySelector(".remove").addEventListener("click", () => {
       const wasNotice = el.kind === "notice";
       el.remove();
@@ -630,6 +641,9 @@
       kind: el.kind,
       message: el.querySelector(".msg-input").value.trim(),
       after_close_url: el.querySelector(".link-input").value.trim(),
+      target_pc: el.querySelector(".target-input")
+        ? el.querySelector(".target-input").value.trim()
+        : "",
     }));
   }
 
@@ -640,7 +654,8 @@
       .sort((a, b) => (a.time + a.kind).localeCompare(b.time + b.kind));
     return JSON.stringify([
       sorted.map((e) => [
-        e.time, e.kind || "checkout", (e.qr_image || "").slice(0, 80), e.message || "", e.after_close_url,
+        e.time, e.kind || "checkout", (e.qr_image || "").slice(0, 80),
+        e.message || "", e.after_close_url, e.target_pc || "",
       ]),
       days,
       (base || "").slice(0, 80),

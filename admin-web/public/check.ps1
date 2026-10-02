@@ -20,6 +20,10 @@ function Write-Check($label, $ok, $detail) {
 Write-Host ""
 Write-Host "=== 퇴실 QR 프로그램 자가진단 ===" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "이 PC 이름: " -NoNewline
+Write-Host "$env:COMPUTERNAME" -ForegroundColor Yellow
+Write-Host "(매니저가 이 PC에만 지정 공지를 보내야 할 때 이 이름을 알려주세요)" -ForegroundColor DarkGray
+Write-Host ""
 
 # 1. 설치 여부
 $installed = Test-Path (Join-Path $InstallDir "main.py")

@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.6.2"
+VERSION = "1.7.0"
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/version.json"
 )
@@ -235,6 +236,21 @@ def times_of(state: dict) -> list:
     return normalize_times(state.get("checkout_time"))
 
 
+def current_pc_name() -> str:
+    try:
+        return socket.gethostname().strip()
+    except OSError:
+        return ""
+
+
+def entry_applies_here(entry: dict) -> bool:
+    """target_pc가 비어 있으면 전원 대상, 채워져 있으면 그 PC에서만 True."""
+    target = (entry.get("target_pc") or "").strip()
+    if not target:
+        return True
+    return target.lower() == current_pc_name().lower()
+
+
 def schedule_of(state: dict) -> list:
     """시각별 설정 목록을 [{time, qr_image, checkout_url, after_close_url}, ...]로 만든다.
 
@@ -252,6 +268,10 @@ def schedule_of(state: dict) -> list:
             "kind": kind,
             "qr_image": own_image or (None if kind == "notice" else inherited),
             "message": source.get("message") or "",
+            # 공지에만 쓰는 선택 항목: 비워두면 전원에게, 채우면 그 PC에만 표시된다.
+            # 퇴실(checkout)에는 의도적으로 지원하지 않는다 — 퇴실 QR을 한 명에게만
+            # 지정하면 그 순간 나머지 전원이 QR을 못 받게 되기 때문이다.
+            "target_pc": (source.get("target_pc") or "").strip() if kind == "notice" else "",
             "checkout_url": source.get("checkout_url") or state.get("checkout_url", ""),
             "after_close_url": (
                 source.get("after_close_url")
@@ -260,7 +280,9 @@ def schedule_of(state: dict) -> list:
             ),
         }
 
-    by_time = {}
+    # 키를 (시각, 대상PC)로 둔다. 시각만으로 키를 잡으면 "같은 시각, 다른 PC
+    # 대상"으로 등록한 두 공지가 서로를 덮어써 한쪽이 조용히 사라진다.
+    by_key = {}
     raw = state.get("schedule")
     if isinstance(raw, list):
         for item in raw:
@@ -268,13 +290,14 @@ def schedule_of(state: dict) -> list:
                 continue
             time_text = str(item.get("time", "")).strip()
             if parse_hhmm(time_text) is not None:
-                by_time[time_text] = entry(time_text, item)
+                built = entry(time_text, item)
+                by_key[(time_text, built["target_pc"])] = built
 
-    if not by_time:  # 구 형식: 모든 시각이 같은 QR을 공유
+    if not by_key:  # 구 형식: 모든 시각이 같은 QR을 공유 (대상 지정 없음)
         for time_text in times_of(state):
-            by_time[time_text] = entry(time_text, state)
+            by_key[(time_text, "")] = entry(time_text, state)
 
-    return [by_time[t] for t in sorted(by_time, key=parse_hhmm)]
+    return [by_key[k] for k in sorted(by_key, key=lambda k: (parse_hhmm(k[0]), k[1]))]
 
 
 def due_time(now: datetime, times: list, done_today: set, catchup_minutes: int) -> Optional[str]:
@@ -555,7 +578,7 @@ def run_scheduler(config):
             done_today = set()
 
         if is_active_day:
-            entries = schedule_of(state)
+            entries = [e for e in schedule_of(state) if entry_applies_here(e)]
             times = [e["time"] for e in entries]
             target = due_time(now, times, done_today, catchup_minutes)
             if target:
@@ -564,6 +587,8 @@ def run_scheduler(config):
                 done_today.update(t for t in times if parse_hhmm(t) <= parse_hhmm(target))
                 entry = next(e for e in entries if e["time"] == target)
                 label = "공지" if entry.get("kind") == "notice" else "QR"
+                if entry.get("target_pc"):
+                    label += f" (지정: {entry['target_pc']})"
                 log(f"[QRcode] {now_hm} (설정 {target}) - {label} 화면 표시")
                 # 그 시각에 등록된 QR/링크로 띄운다 (시각마다 다를 수 있다)
                 show_qr_window(entry, window_title, display_seconds)
@@ -634,6 +659,19 @@ def main():
         assert get_display_image({"checkout_url": "https://example.com"}) is not None, "퇴실 폴백 오류"
         _legacy = schedule_of({"checkout_times": ["09:00", "18:00"], "qr_image": "공용"})
         assert len(_legacy) == 2 and _legacy[1]["qr_image"] == "공용", "구 형식 호환 오류"
+        _here = current_pc_name()
+        assert entry_applies_here({"target_pc": ""}), "빈 대상 PC는 전원 적용 오류"
+        assert entry_applies_here({"target_pc": _here.upper()}), "대상 PC 대소문자 비교 오류"
+        assert not entry_applies_here({"target_pc": _here + "-NOT-THIS-ONE"}), "다른 PC 차단 오류"
+        _target_notice = schedule_of({
+            "schedule": [{"time": "20:00", "kind": "notice", "message": "x", "target_pc": "OTHER"}]
+        })
+        assert _target_notice[0]["target_pc"] == "OTHER", "공지 대상 PC 보존 오류"
+        _target_checkout = schedule_of({
+            "schedule": [{"time": "18:00", "kind": "checkout", "target_pc": "OTHER"}],
+            "base_qr_image": "기본",
+        })
+        assert _target_checkout[0]["target_pc"] == "", "퇴실 항목은 대상 PC를 무시해야 함"
         make_qr_image("https://example.com/selftest")  # 이미지 생성 경로
         int(config.get("display_seconds", 600))
         print(f"selftest OK (v{VERSION})")
@@ -654,7 +692,7 @@ def main():
                 state["after_close_url"] = remote.get("after_close_url", state.get("after_close_url"))
                 state["schedule"] = remote.get("schedule", state.get("schedule"))
         # 일정표가 있으면 가장 이른 시각의 설정으로 미리보기 한다
-        entries = schedule_of(state)
+        entries = [e for e in schedule_of(state) if entry_applies_here(e)]
         show_qr_window(
             entries[0] if entries else state,
             config.get("window_title", "퇴실 QR코드"),

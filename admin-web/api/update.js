@@ -33,14 +33,20 @@ module.exports = async function handler(req, res) {
   // 새 형식은 시각마다 QR/링크를 따로 가진다. 구 형식(공용 QR + 시각 목록)도 그대로 받는다.
   let entries;
   if (Array.isArray(schedule) && schedule.length) {
-    entries = schedule.map((e) => ({
-      time: String((e && e.time) || "").trim(),
-      // 퇴실은 이미지를 비워두면 기본 QR을 쓰고, 공지는 물려받지 않는다.
-      kind: e && e.kind === "notice" ? "notice" : "checkout",
-      qr_image: (e && e.qr_image) || "",
-      message: String((e && e.message) || "").trim(),
-      after_close_url: String((e && e.after_close_url) || "").trim(),
-    }));
+    entries = schedule.map((e) => {
+      const kind = e && e.kind === "notice" ? "notice" : "checkout";
+      return {
+        time: String((e && e.time) || "").trim(),
+        // 퇴실은 이미지를 비워두면 기본 QR을 쓰고, 공지는 물려받지 않는다.
+        kind,
+        qr_image: (e && e.qr_image) || "",
+        message: String((e && e.message) || "").trim(),
+        after_close_url: String((e && e.after_close_url) || "").trim(),
+        // 특정 PC에만 보여주는 지정 공지. 퇴실에는 적용하지 않는다 — 퇴실 QR을
+        // 한 PC로 좁히면 나머지 전원이 그날 QR을 못 받게 되기 때문이다.
+        target_pc: kind === "notice" ? String((e && e.target_pc) || "").trim().slice(0, 64) : "",
+      };
+    });
   } else {
     const rawTimes = Array.isArray(checkout_times)
       ? checkout_times
@@ -94,10 +100,18 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // 같은 시각이 두 번 등록되면 어느 쪽이 뜰지 알 수 없으므로 막는다
-  const dupe = entries.map((e) => e.time).find((t, i, arr) => arr.indexOf(t) !== i);
-  if (dupe) {
-    res.status(400).json({ error: `같은 시각이 두 번 등록되었습니다: ${dupe}` });
+  // 같은 시각 + 같은 대상(전원 또는 동일 PC)이 겹치면 어느 쪽이 뜰지 알 수 없다.
+  // 다만 서로 다른 PC를 지정한 공지라면 같은 시각이어도 각자에게만 뜨므로 허용한다.
+  const dupeKey = (e) => `${e.time}::${e.target_pc || "ALL"}`;
+  const keys = entries.map(dupeKey);
+  const dupeIdx = keys.findIndex((k, i) => keys.indexOf(k) !== i);
+  if (dupeIdx !== -1) {
+    const e = entries[dupeIdx];
+    res.status(400).json({
+      error: e.target_pc
+        ? `${e.time}에 "${e.target_pc}" 대상 공지가 이미 있습니다.`
+        : `같은 시각이 두 번 등록되었습니다: ${e.time}`,
+    });
     return;
   }
 

@@ -109,13 +109,17 @@ module.exports = async function handler(req, res) {
     if (action === "save") {
       // 새 형식은 시각마다 QR/링크를 가진다. 구 형식도 같은 모양으로 변환해 저장한다.
       const entries = Array.isArray(schedule) && schedule.length
-        ? schedule.map((e) => ({
-            time: String((e && e.time) || "").trim(),
-            kind: e && e.kind === "notice" ? "notice" : "checkout",
-            qr_image: (e && e.qr_image) || "",
-            message: String((e && e.message) || "").trim(),
-            after_close_url: String((e && e.after_close_url) || "").trim(),
-          }))
+        ? schedule.map((e) => {
+            const kind = e && e.kind === "notice" ? "notice" : "checkout";
+            return {
+              time: String((e && e.time) || "").trim(),
+              kind,
+              qr_image: (e && e.qr_image) || "",
+              message: String((e && e.message) || "").trim(),
+              after_close_url: String((e && e.after_close_url) || "").trim(),
+              target_pc: kind === "notice" ? String((e && e.target_pc) || "").trim().slice(0, 64) : "",
+            };
+          })
         : (Array.isArray(checkout_times) && checkout_times.length
             ? checkout_times
             : String(checkout_time || "").split(",")
