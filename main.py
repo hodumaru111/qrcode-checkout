@@ -27,7 +27,7 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/version.json"
 )
@@ -36,6 +36,7 @@ MIN_MAIN_PY_BYTES = 5_000  # 이보다 작으면 잘린 응답으로 간주
 
 DEFAULT_CHECKOUT_TIME = "18:00"
 DEFAULT_ACTIVE_DAYS = ["mon", "tue", "wed", "thu", "fri"]
+DEFAULT_CLOSE_LOCK_SECONDS = 3  # QR이 뜬 직후 이 시간 동안은 키/클릭으로 닫히지 않는다
 DEFAULT_CATCHUP_MINUTES = 120  # 절전/부팅 지연으로 정시를 놓쳤을 때 뒤늦게라도 띄우는 허용 범위
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # datetime.weekday() 순서
 
@@ -135,7 +136,9 @@ def get_display_image(state: dict):
     return make_qr_image(state.get("checkout_url", ""))
 
 
-def show_qr_window(state: dict, title: str, display_seconds: int):
+def show_qr_window(
+    state: dict, title: str, display_seconds: int, lock_seconds: int = DEFAULT_CLOSE_LOCK_SECONDS
+):
     img = get_display_image(state)
     if img is not None:
         img.thumbnail((700, 700))
@@ -188,13 +191,32 @@ def show_qr_window(state: dict, title: str, display_seconds: int):
     def close(_event=None):
         root.destroy()
 
+    # 학생이 작업(타이핑) 중일 때 QR이 뜨면, 치던 키 때문에 QR을 보기도 전에
+    # 닫혀버린다. 뜬 직후 잠깐은 키/클릭을 무시하고, 끝나면 안내 문구를 바꾼다.
+    # (시간이 다 돼서 자동으로 닫히는 것은 이 잠금과 무관하게 항상 동작한다.)
+    lock = {"on": lock_seconds > 0}
+
+    def unlock():
+        lock["on"] = False
+        label_hint.config(text=hint)
+
+    def close_by_key(_event=None):
+        if not lock["on"]:
+            close()
+
     def close_by_click(_event=None):
+        if lock["on"]:
+            return
         root.destroy()
         after_close_url = state.get("after_close_url")
         if after_close_url:
             webbrowser.open(after_close_url)
 
-    root.bind("<Key>", close)
+    if lock["on"]:
+        label_hint.config(text="잠시 후부터 닫을 수 있습니다...")
+        root.after(lock_seconds * 1000, unlock)
+
+    root.bind("<Key>", close_by_key)
     root.bind("<Button-1>", close_by_click)
     root.after(display_seconds * 1000, close)
 
@@ -485,6 +507,7 @@ def run_scheduler(config):
     sync_url = config.get("sync_url")
     fetch_interval = int(config.get("fetch_interval_seconds", 300))
     display_seconds = int(config.get("display_seconds", 600))
+    close_lock_seconds = max(0, int(config.get("close_lock_seconds", DEFAULT_CLOSE_LOCK_SECONDS)))
     window_title = config.get("window_title", "퇴실 QR코드")
     catchup_minutes = int(config.get("catchup_minutes", DEFAULT_CATCHUP_MINUTES))
     update_url = config.get("update_url", DEFAULT_UPDATE_URL)
@@ -591,7 +614,7 @@ def run_scheduler(config):
                     label += f" (지정: {entry['target_pc']})"
                 log(f"[QRcode] {now_hm} (설정 {target}) - {label} 화면 표시")
                 # 그 시각에 등록된 QR/링크로 띄운다 (시각마다 다를 수 있다)
-                show_qr_window(entry, window_title, display_seconds)
+                show_qr_window(entry, window_title, display_seconds, close_lock_seconds)
 
         time.sleep(15)
 
@@ -697,6 +720,7 @@ def main():
             entries[0] if entries else state,
             config.get("window_title", "퇴실 QR코드"),
             int(config.get("display_seconds", 600)),
+            max(0, int(config.get("close_lock_seconds", DEFAULT_CLOSE_LOCK_SECONDS))),
         )
         return
 
