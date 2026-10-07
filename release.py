@@ -23,6 +23,8 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 MAIN_PY = ROOT / "main.py"
 VERSION_JSON = ROOT / "version.json"
+ASSET_DIR = ROOT / "assets"
+MAX_ASSET_BYTES = 3_000_000  # main.py의 MAX_ASSET_BYTES와 같아야 한다 (넘으면 학생 PC가 거부한다)
 RAW_BASE = "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main"
 
 
@@ -59,12 +61,43 @@ def main():
         "sha256": hashlib.sha256(normalized).hexdigest(),
         "enabled": True,
     }
+    intro = ASSET_DIR / "intro.webp"
+    if intro.exists():
+        data = intro.read_bytes()  # 바이너리라 git/raw가 바이트를 바꾸지 않는다 (줄바꿈 정규화 불필요)
+        if len(data) > MAX_ASSET_BYTES:
+            sys.exit(f"assets/intro.webp가 {len(data)} bytes입니다. 학생 프로그램은 {MAX_ASSET_BYTES} 초과 파일을 받지 않습니다.")
+        # 학생 PC가 저장 전에 하는 검사와 같다: 실제로 열리고, 프레임이 둘 이상이어야 한다
+        try:
+            from PIL import Image
+            import io
+
+            im = Image.open(io.BytesIO(data))
+            im.load()
+            frames = getattr(im, "n_frames", 1)
+        except Exception as e:
+            sys.exit(f"assets/intro.webp를 열 수 없습니다: {e}")
+        if frames < 2:
+            sys.exit("assets/intro.webp에 프레임이 하나뿐입니다 (영상이 아닙니다).")
+        fps = 12
+        meta = ASSET_DIR / "intro.json"
+        if meta.exists():
+            fps = json.loads(meta.read_text(encoding="utf-8-sig")).get("fps", fps)
+        manifest["assets"] = {
+            "intro": {
+                "url": f"{RAW_BASE}/assets/intro.webp",
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+                "fps": fps,
+            }
+        }
+        print(f"인트로 영상 포함: {frames}프레임, {len(data) // 1024}KB, {fps}fps")
+
     VERSION_JSON.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
     print(f"version.json 생성 완료 (v{version}, sha256 {manifest['sha256'][:12]}...)")
-    print("main.py와 version.json을 함께 커밋해야 합니다.")
+    print("main.py, version.json, assets/를 함께 커밋해야 합니다.")
 
 
 if __name__ == "__main__":

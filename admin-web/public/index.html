@@ -158,6 +158,8 @@
   .sumrow img { width: 34px; height: 34px; object-fit: contain; background: #fff; border-radius: 4px; }
   .sub-muted { color: var(--muted); font-size: 1rem; }
   #editBtn { margin-top: 20px; }
+  .switchrow { display: flex; align-items: center; gap: 12px; margin-top: 18px; font-weight: 600; cursor: pointer; }
+  .switchrow input { width: 22px; height: 22px; margin: 0; flex: none; accent-color: var(--accent); }
   .sectionhint { font-size: 1rem; color: var(--muted); margin: -6px 0 12px; }
   .empty { font-size: 1.05rem; color: var(--muted); text-align: center; padding: 14px 0; margin: 0; }
   .addrow { width: 100%; border: 1px dashed var(--border); background: transparent; color: var(--muted); }
@@ -251,6 +253,10 @@
               <h3>실행 요일</h3>
               <div id="sumDays"></div>
             </div>
+            <div class="sumgroup">
+              <h3>퇴실 영상</h3>
+              <div id="sumIntro"></div>
+            </div>
           </div>
         </div>
         <button id="editBtn" class="block">수정하기</button>
@@ -281,6 +287,8 @@
       <h2>퇴실 시각</h2>
       <p class="sectionhint">이 시각에 기본 QR이 표시됩니다.</p>
       <div id="checkoutList"></div>
+      <label class="switchrow"><input type="checkbox" id="introToggle" checked /><span>퇴실 때 5초 영상을 먼저 보여주기</span></label>
+      <p class="sectionhint" style="margin-top:6px">영상이 도는 동안은 키·클릭이 무시되고, 끝나면 QR이 나옵니다. 공지에는 틀지 않습니다.</p>
       <p id="legacyNote" class="hintline"></p>
     </div>
 
@@ -648,7 +656,7 @@
   }
 
   // ---------- 변경 감지 ----------
-  function sign(entries, days, base) {
+  function sign(entries, days, base, intro) {
     const sorted = entries
       .slice()
       .sort((a, b) => (a.time + a.kind).localeCompare(b.time + b.kind));
@@ -659,10 +667,13 @@
       ]),
       days,
       (base || "").slice(0, 80),
+      intro ? 1 : 0,
     ]);
   }
 
   const liveBase = (d) => (d && (d.base_qr_image || d.qr_image)) || "";
+  // 설정에 값이 없으면(예전에 저장된 설정) 켜짐으로 본다. 학생 프로그램의 기본값과 같다.
+  const liveIntro = (d) => !(d && d.intro_enabled === false);
 
   function describeChanges(now, before) {
     const parts = [];
@@ -679,6 +690,7 @@
     if (changedImg.length) parts.push("QR 변경 " + changedImg.map((e) => e.time).join(", "));
     if (getDays().join(",") !== (live.active_days || []).join(",")) parts.push("요일 변경");
     if ((baseImage || "").slice(0, 80) !== liveBase(live).slice(0, 80)) parts.push("기본 QR 변경");
+    if ($("introToggle").checked !== liveIntro(live)) parts.push($("introToggle").checked ? "영상 켬" : "영상 끔");
     return parts.length ? parts.join(" · ") : "수정한 내용";
   }
 
@@ -687,7 +699,8 @@
     const now = collect();
     const before = toEntries(live);
     const dirty =
-      sign(now, getDays(), baseImage) !== sign(before, live.active_days || [], liveBase(live));
+      sign(now, getDays(), baseImage, $("introToggle").checked) !==
+      sign(before, live.active_days || [], liveBase(live), liveIntro(live));
     $("statusBadge").className = "status" + (dirty ? " dirty" : "");
     $("statusBadge").textContent = dirty ? "저장 안 됨" : "적용 중";
     // 버튼은 항상 같은 자리에 두고, 바꾼 게 없을 때만 비활성으로 알린다
@@ -764,6 +777,7 @@
     $("sumDays").textContent = DAY_ORDER.filter((d) => days.includes(d))
       .map((d) => DAY_LABEL[d])
       .join(" ") || "-";
+    $("sumIntro").textContent = liveIntro(data) ? "켜짐 (5초)" : "꺼짐";
   }
 
   function showView() {
@@ -786,6 +800,7 @@
     paintBase();
     renderEntries(toEntries(data));
     renderDays(data.active_days);
+    $("introToggle").checked = liveIntro(data);
     refreshDirty();
     const times = toEntries(data).map((e) => e.time).filter(Boolean);
     $("subtitle").textContent = times.length
@@ -825,9 +840,12 @@
   $("unlockBtn").addEventListener("click", unlock);
   $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") unlock(); });
 
+  $("introToggle").addEventListener("change", refreshDirty);
+
   $("editBtn").addEventListener("click", () => {
     renderEntries(toEntries(live));   // 편집을 열 때는 항상 저장된 값에서 시작한다
     renderDays(live.active_days);
+    $("introToggle").checked = liveIntro(live);
     baseImage = liveBase(live);
     paintBase();
     refreshDirty();
@@ -844,6 +862,7 @@
     paintBase();
     renderEntries(toEntries(live));
     renderDays(live.active_days);
+    $("introToggle").checked = liveIntro(live);
     refreshDirty();
     showView();
     toast("되돌렸습니다");
@@ -876,7 +895,10 @@
 
     $("saveBtn").disabled = true;
     try {
-      await api("/api/update", { password, schedule, qr_image: baseImage, active_days: getDays() });
+      await api("/api/update", {
+        password, schedule, qr_image: baseImage, active_days: getDays(),
+        intro_enabled: $("introToggle").checked,
+      });
       await loadLive();
       showView();
       toast("저장했습니다 · 학생 PC에 1분 내 반영");

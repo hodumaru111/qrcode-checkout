@@ -9,8 +9,10 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const { password, checkout_time, checkout_times, qr_image, active_days, after_close_url, schedule } =
-    req.body || {};
+  const {
+    password, checkout_time, checkout_times, qr_image, active_days, after_close_url, schedule,
+    intro_enabled,
+  } = req.body || {};
 
   let passwordOk;
   try {
@@ -162,6 +164,8 @@ module.exports = async function handler(req, res) {
       checkout_times: (checkouts.length ? checkouts : entries).map((e) => e.time),
       active_days: days,
       after_close_url: legacy.after_close_url,
+      // 퇴실 때 5초 영상을 먼저 틀지. 값이 안 오면 켜짐 (명시적으로 false일 때만 끈다)
+      intro_enabled: intro_enabled !== false,
     },
     null,
     2

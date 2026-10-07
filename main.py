@@ -27,7 +27,7 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/version.json"
 )
@@ -37,6 +37,11 @@ MIN_MAIN_PY_BYTES = 5_000  # 이보다 작으면 잘린 응답으로 간주
 DEFAULT_CHECKOUT_TIME = "18:00"
 DEFAULT_ACTIVE_DAYS = ["mon", "tue", "wed", "thu", "fri"]
 DEFAULT_CLOSE_LOCK_SECONDS = 3  # QR이 뜬 직후 이 시간 동안은 키/클릭으로 닫히지 않는다
+# 인트로 영상이 끝난 직후의 잠금. 영상이 도는 5초가 이미 입력을 막아 주므로 기본은 0.
+DEFAULT_LOCK_AFTER_INTRO_SECONDS = 0
+ASSET_DIR = Path(__file__).parent / "assets"
+MAX_ASSET_BYTES = 3_000_000  # 인트로 영상 크기 상한 (이보다 크면 받지 않는다)
+DEFAULT_INTRO_FPS = 12
 DEFAULT_CATCHUP_MINUTES = 120  # 절전/부팅 지연으로 정시를 놓쳤을 때 뒤늦게라도 띄우는 허용 범위
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # datetime.weekday() 순서
 
@@ -136,9 +141,108 @@ def get_display_image(state: dict):
     return make_qr_image(state.get("checkout_url", ""))
 
 
+def intro_frame_index(elapsed: float, fps: float, n_frames: int) -> Optional[int]:
+    """경과 시간으로 지금 보여줄 프레임 번호를 구한다. 영상이 끝났으면 None.
+
+    프레임 수를 세는 대신 경과 시간으로 계산하므로, 느린 PC에서 프레임이 밀려도
+    영상 전체가 정해진 시간 안에 끝난다.
+    """
+    if fps <= 0 or n_frames <= 0:
+        return None
+    idx = int(elapsed * fps)
+    return idx if idx < n_frames else None
+
+
+def load_intro(state: dict) -> Optional[dict]:
+    """재생할 인트로 영상 정보 {"path", "fps"}. 꺼져 있거나 파일이 없으면 None."""
+    if state.get("intro_enabled") is False:
+        return None
+    path = ASSET_DIR / "intro.webp"
+    if not path.exists():
+        return None
+    fps = DEFAULT_INTRO_FPS
+    try:
+        meta = ASSET_DIR / "intro.json"
+        if meta.exists():
+            fps = float(json.loads(meta.read_text(encoding="utf-8-sig")).get("fps", fps))
+    except (OSError, ValueError):
+        pass
+    return {"path": str(path), "fps": fps}
+
+
+def intro_for_entry(entry: dict, state: dict) -> Optional[dict]:
+    """퇴실 항목에만 영상을 튼다. 공지는 자막이 퇴실용이라 틀지 않는다."""
+    if entry.get("kind") == "notice":
+        return None
+    return load_intro(state)
+
+
+def play_intro(root, intro: dict, on_done, later=None) -> bool:
+    """루트 창 안에서 영상을 틀고, 끝나면 on_done()을 부른다.
+
+    열지 못하면 아무것도 그리지 않고 False를 돌려준다 (호출한 쪽이 QR로 넘어간다).
+    later(ms, fn)은 타이머 예약 함수다. 창을 닫을 때 한꺼번에 취소하려고 호출한 쪽에서 넘긴다.
+    """
+    later = later or root.after
+    try:
+        im = Image.open(intro["path"])
+        n_frames = getattr(im, "n_frames", 1)
+        if n_frames < 2:
+            return False
+        w, h = im.size
+        screen_w, screen_h = root.winfo_screenwidth(), root.winfo_screenheight()
+        scale = min(screen_h * 0.80 / h, screen_w * 0.60 / w)
+        size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    except Exception as e:  # 손상된 파일 등 — 영상 없이 QR로 간다
+        log(f"[QRcode] 인트로 영상을 열지 못했습니다 (건너뜀): {e}")
+        return False
+
+    frame = tk.Frame(root, bg="white")
+    frame.pack(fill="both", expand=True)
+    label = tk.Label(frame, bg="white")
+    label.place(relx=0.5, rely=0.5, anchor="center")
+    shown = {"idx": -1, "photo": None}
+    started = time.time()
+
+    def finish():
+        frame.destroy()
+        on_done()
+
+    def tick():
+        idx = intro_frame_index(time.time() - started, intro["fps"], n_frames)
+        if idx is None:
+            finish()
+            return
+        if idx != shown["idx"]:
+            try:
+                im.seek(idx)
+                resized = im.convert("RGB").resize(size, Image.Resampling.BILINEAR)
+                shown["photo"] = ImageTk.PhotoImage(resized)  # 참조를 들고 있어야 사라지지 않는다
+                label.configure(image=shown["photo"])
+                shown["idx"] = idx
+            except Exception as e:  # 재생 도중 깨지면 거기서 멈추고 QR로
+                log(f"[QRcode] 인트로 재생 중 오류 (QR로 넘어감): {e}")
+                finish()
+                return
+        later(30, tick)
+
+    tick()
+    return True
+
+
 def show_qr_window(
-    state: dict, title: str, display_seconds: int, lock_seconds: int = DEFAULT_CLOSE_LOCK_SECONDS
+    state: dict,
+    title: str,
+    display_seconds: int,
+    lock_seconds: int = DEFAULT_CLOSE_LOCK_SECONDS,
+    intro: Optional[dict] = None,
+    lock_after_intro: int = DEFAULT_LOCK_AFTER_INTRO_SECONDS,
 ):
+    """전체화면 QR(또는 공지) 창.
+
+    intro가 있으면 먼저 영상을 틀고(그동안 키/클릭은 무시) 끝나면 같은 창에서 QR을 보여준다.
+    영상이 없으면 QR이 뜬 직후 lock_seconds 동안 입력을 무시한다.
+    """
     img = get_display_image(state)
     if img is not None:
         img.thumbnail((700, 700))
@@ -150,75 +254,106 @@ def show_qr_window(
     root.attributes("-fullscreen", True)
     root.configure(bg="white")
 
-    label_title = tk.Label(root, text=title, font=("Malgun Gothic", 24, "bold"), bg="white")
-    label_title.pack(pady=(40, 10))
-
-    photo = None
-    if img is not None:
-        photo = ImageTk.PhotoImage(img)
-        tk.Label(root, image=photo, bg="white").pack(expand=True)
-        # 문구는 이미지를 가리지 않도록 아래에 둔다
-        if message:
-            tk.Label(
-                root,
-                text=message,
-                font=("Malgun Gothic", 18),
-                bg="white",
-                fg="#1f2328",
-                wraplength=1000,
-                justify="center",
-            ).pack(pady=(4, 0))
-    else:
-        # 이미지 없는 공지: 문구만 화면 가운데에 크게
-        tk.Label(
-            root,
-            text=message,
-            font=("Malgun Gothic", 34, "bold"),
-            bg="white",
-            fg="#1f2328",
-            wraplength=1100,
-            justify="center",
-        ).pack(expand=True)
-
     hint = (
         "QR 스캔 후 아무 키나 누르거나 화면을 클릭하면 닫힙니다."
         if img is not None
         else "아무 키나 누르거나 화면을 클릭하면 닫힙니다."
     )
-    label_hint = tk.Label(root, text=hint, font=("Malgun Gothic", 14), bg="white", fg="gray")
-    label_hint.pack(pady=(10, 40))
+    refs = {}  # PhotoImage 참조 유지용
+    hint_label = {}
+    phase = {"intro": False}
+    lock = {"on": False}
+    timers = []
 
-    def close(_event=None):
+    def later(ms, fn):
+        timers.append(root.after(ms, fn))
+
+    def shutdown():
+        # 창을 닫은 뒤에도 예약된 타이머가 남아 있으면, 다음 창을 띄울 때 실행되며
+        # "invalid command name" 오류가 난다. 닫기 전에 전부 취소한다.
+        for t in timers:
+            try:
+                root.after_cancel(t)
+            except Exception:
+                pass
         root.destroy()
 
-    # 학생이 작업(타이핑) 중일 때 QR이 뜨면, 치던 키 때문에 QR을 보기도 전에
-    # 닫혀버린다. 뜬 직후 잠깐은 키/클릭을 무시하고, 끝나면 안내 문구를 바꾼다.
-    # (시간이 다 돼서 자동으로 닫히는 것은 이 잠금과 무관하게 항상 동작한다.)
-    lock = {"on": lock_seconds > 0}
+    def close(_event=None):
+        shutdown()
+
+    def build_content():
+        tk.Label(root, text=title, font=("Malgun Gothic", 24, "bold"), bg="white").pack(
+            pady=(40, 10)
+        )
+        if img is not None:
+            refs["photo"] = ImageTk.PhotoImage(img)
+            tk.Label(root, image=refs["photo"], bg="white").pack(expand=True)
+            # 문구는 이미지를 가리지 않도록 아래에 둔다
+            if message:
+                tk.Label(
+                    root,
+                    text=message,
+                    font=("Malgun Gothic", 18),
+                    bg="white",
+                    fg="#1f2328",
+                    wraplength=1000,
+                    justify="center",
+                ).pack(pady=(4, 0))
+        else:
+            # 이미지 없는 공지: 문구만 화면 가운데에 크게
+            tk.Label(
+                root,
+                text=message,
+                font=("Malgun Gothic", 34, "bold"),
+                bg="white",
+                fg="#1f2328",
+                wraplength=1100,
+                justify="center",
+            ).pack(expand=True)
+        hint_label["w"] = tk.Label(root, text=hint, font=("Malgun Gothic", 14), bg="white", fg="gray")
+        hint_label["w"].pack(pady=(10, 40))
 
     def unlock():
         lock["on"] = False
-        label_hint.config(text=hint)
+        hint_label["w"].config(text=hint)
+
+    def show_content(lock_secs):
+        build_content()
+        # 학생이 작업(타이핑) 중일 때 QR이 뜨면, 치던 키 때문에 QR을 보기도 전에 닫혀버린다.
+        # 뜬 직후 잠깐은 키/클릭을 무시하고, 끝나면 안내 문구를 바꾼다.
+        if lock_secs > 0:
+            lock["on"] = True
+            hint_label["w"].config(text="잠시 후부터 닫을 수 있습니다...")
+            later(lock_secs * 1000, unlock)
 
     def close_by_key(_event=None):
-        if not lock["on"]:
+        if not phase["intro"] and not lock["on"]:
             close()
 
     def close_by_click(_event=None):
-        if lock["on"]:
+        if phase["intro"] or lock["on"]:
             return
-        root.destroy()
+        shutdown()
         after_close_url = state.get("after_close_url")
         if after_close_url:
             webbrowser.open(after_close_url)
 
-    if lock["on"]:
-        label_hint.config(text="잠시 후부터 닫을 수 있습니다...")
-        root.after(lock_seconds * 1000, unlock)
+    def finish_intro():
+        phase["intro"] = False
+        show_content(lock_after_intro)
 
     root.bind("<Key>", close_by_key)
     root.bind("<Button-1>", close_by_click)
-    root.after(display_seconds * 1000, close)
+    # 시간이 다 돼서 자동으로 닫히는 것은 잠금/영상과 무관하게 항상 동작한다
+    later(display_seconds * 1000, close)
+
+    if intro:
+        phase["intro"] = True
+        if not play_intro(root, intro, finish_intro, later):
+            phase["intro"] = False
+            show_content(lock_seconds)  # 영상을 못 틀었으면 예전처럼 QR 잠금을 쓴다
+    else:
+        show_content(lock_seconds)
 
     root.mainloop()
 
@@ -345,6 +480,75 @@ def should_trigger(now: datetime, checkout_time: str, catchup_minutes: int) -> b
     return 0 <= current - target <= catchup_minutes
 
 
+def verify_asset(data: bytes, expected_sha256: str, max_bytes: int = MAX_ASSET_BYTES) -> Optional[str]:
+    """내려받은 영상 파일을 저장해도 되는지 검사한다. 문제가 있으면 사유, 없으면 None."""
+    if not data:
+        return "빈 파일입니다"
+    if len(data) > max_bytes:
+        return f"파일이 너무 큽니다 ({len(data)} bytes)"
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected_sha256:
+        return f"체크섬 불일치 (기대 {expected_sha256[:12]}..., 실제 {actual[:12]}...)"
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        if getattr(im, "n_frames", 1) < 2:
+            return "프레임이 하나뿐입니다 (영상이 아닙니다)"
+    except Exception as e:
+        return f"이미지로 열 수 없습니다: {e}"
+    return None
+
+
+def sync_assets(manifest: dict) -> None:
+    """version.json이 가리키는 인트로 영상을 내려받아 둔다. 실패해도 조용히 넘어간다.
+
+    영상은 main.py 교체와 별개라서, 버전이 같아도 매번 확인한다. 이미 같은 파일이
+    있으면 아무것도 받지 않는다.
+    """
+    asset = (manifest.get("assets") or {}).get("intro")
+    if not isinstance(asset, dict):
+        return
+    url = asset.get("url")
+    expected = str(asset.get("sha256") or "").lower()
+    if not url or len(expected) != 64:
+        return
+    fps = asset.get("fps") or DEFAULT_INTRO_FPS
+    dest = ASSET_DIR / "intro.webp"
+    meta = ASSET_DIR / "intro.json"
+
+    try:
+        if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() == expected:
+            return
+    except OSError:
+        pass
+
+    try:
+        sep = "&" if "?" in url else "?"
+        req = urllib.request.Request(
+            f"{url}{sep}t={int(time.time())}", headers={"Cache-Control": "no-cache"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read(MAX_ASSET_BYTES + 1)  # 상한을 넘는 응답은 끝까지 읽지 않는다
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        log(f"[QRcode] 인트로 영상 내려받기 실패 (무시): {e}")
+        return
+
+    problem = verify_asset(data, expected)
+    if problem:
+        log(f"[QRcode] 인트로 영상 거부 - {problem}")
+        return
+
+    try:
+        ASSET_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".webp.new")
+        tmp.write_bytes(data)
+        os.replace(tmp, dest)  # 재생 중인 파일을 반쯤 쓴 채로 두지 않는다
+        meta.write_text(json.dumps({"fps": fps, "sha256": expected}), encoding="utf-8")
+        log(f"[QRcode] 인트로 영상 저장 ({len(data) // 1024}KB, {fps}fps)")
+    except OSError as e:
+        log(f"[QRcode] 인트로 영상 저장 실패 (무시): {e}")
+
+
 def fetch_json(url: str, timeout: int = 10):
     sep = "&" if "?" in url else "?"
     req = urllib.request.Request(
@@ -454,6 +658,11 @@ def check_for_update(update_url: str) -> bool:
     if manifest.get("enabled") is False:
         return False  # 긴급 중단 스위치
 
+    try:
+        sync_assets(manifest)  # 버전이 같아도 영상은 매번 확인한다. 실패해도 업데이트는 계속한다
+    except Exception as e:
+        log(f"[QRcode] 영상 동기화 오류 (무시): {e}")
+
     remote_version = str(manifest.get("version", ""))
     if not remote_version or remote_version == VERSION:
         return False
@@ -508,6 +717,9 @@ def run_scheduler(config):
     fetch_interval = int(config.get("fetch_interval_seconds", 300))
     display_seconds = int(config.get("display_seconds", 600))
     close_lock_seconds = max(0, int(config.get("close_lock_seconds", DEFAULT_CLOSE_LOCK_SECONDS)))
+    lock_after_intro = max(
+        0, int(config.get("close_lock_after_intro_seconds", DEFAULT_LOCK_AFTER_INTRO_SECONDS))
+    )
     window_title = config.get("window_title", "퇴실 QR코드")
     catchup_minutes = int(config.get("catchup_minutes", DEFAULT_CATCHUP_MINUTES))
     update_url = config.get("update_url", DEFAULT_UPDATE_URL)
@@ -519,6 +731,7 @@ def run_scheduler(config):
     state.setdefault("checkout_time", config.get("checkout_time", DEFAULT_CHECKOUT_TIME))
     state.setdefault("checkout_times", config.get("checkout_times"))
     state.setdefault("schedule", config.get("schedule"))
+    state.setdefault("intro_enabled", config.get("intro_enabled", True))
     state.setdefault("base_qr_image", config.get("base_qr_image"))
     state.setdefault("active_days", config.get("active_days", DEFAULT_ACTIVE_DAYS))
     state.setdefault("after_close_url", config.get("after_close_url"))
@@ -581,6 +794,7 @@ def run_scheduler(config):
                 state["checkout_time"] = remote.get("checkout_time", state["checkout_time"])
                 state["checkout_times"] = remote.get("checkout_times", state.get("checkout_times"))
                 state["schedule"] = remote.get("schedule", state.get("schedule"))
+                state["intro_enabled"] = remote.get("intro_enabled", state.get("intro_enabled", True))
                 state["base_qr_image"] = remote.get("base_qr_image", state.get("base_qr_image"))
                 state["active_days"] = remote.get("active_days", state["active_days"])
                 state["after_close_url"] = remote.get("after_close_url", state.get("after_close_url"))
@@ -612,9 +826,14 @@ def run_scheduler(config):
                 label = "공지" if entry.get("kind") == "notice" else "QR"
                 if entry.get("target_pc"):
                     label += f" (지정: {entry['target_pc']})"
+                intro = intro_for_entry(entry, state)
+                if intro:
+                    label += " + 영상"
                 log(f"[QRcode] {now_hm} (설정 {target}) - {label} 화면 표시")
                 # 그 시각에 등록된 QR/링크로 띄운다 (시각마다 다를 수 있다)
-                show_qr_window(entry, window_title, display_seconds, close_lock_seconds)
+                show_qr_window(
+                    entry, window_title, display_seconds, close_lock_seconds, intro, lock_after_intro
+                )
 
         time.sleep(15)
 
@@ -682,6 +901,32 @@ def main():
         assert get_display_image({"checkout_url": "https://example.com"}) is not None, "퇴실 폴백 오류"
         _legacy = schedule_of({"checkout_times": ["09:00", "18:00"], "qr_image": "공용"})
         assert len(_legacy) == 2 and _legacy[1]["qr_image"] == "공용", "구 형식 호환 오류"
+        assert intro_frame_index(0.0, 12, 60) == 0, "영상 첫 프레임 오류"
+        assert intro_frame_index(2.5, 12, 60) == 30, "영상 중간 프레임 오류"
+        assert intro_frame_index(5.0, 12, 60) is None, "영상 종료 판정 오류"
+        assert intro_frame_index(1.0, 0, 60) is None, "fps 0 처리 오류"
+        assert intro_for_entry({"kind": "notice"}, {}) is None, "공지에는 영상을 틀면 안 됨"
+        assert load_intro({"intro_enabled": False}) is None, "스위치를 끄면 영상이 없어야 함"
+        assert verify_asset(b"", "0" * 64) is not None, "빈 파일 거부 오류"
+        assert verify_asset(b"x" * 10, "0" * 64) is not None, "체크섬 불일치 거부 오류"
+        try:
+            from PIL import features as _features
+
+            _webp_ok = _features.check("webp")
+        except Exception:
+            _webp_ok = False
+        if _webp_ok:  # WebP를 못 읽는 환경에서는 영상이 안 나올 뿐, 업데이트를 막지 않는다
+            _buf = io.BytesIO()
+            _f1, _f2 = Image.new("RGB", (8, 8), "red"), Image.new("RGB", (8, 8), "blue")
+            _f1.save(_buf, format="WEBP", save_all=True, append_images=[_f2], duration=80)
+            _good = _buf.getvalue()
+            assert verify_asset(_good, hashlib.sha256(_good).hexdigest()) is None, "정상 영상 거부 오류"
+            assert verify_asset(_good, "0" * 64) is not None, "변조 영상 통과 오류"
+            _one = io.BytesIO()
+            _f1.save(_one, format="WEBP")
+            assert verify_asset(_one.getvalue(), hashlib.sha256(_one.getvalue()).hexdigest()) is not None, (
+                "단일 프레임 거부 오류"
+            )
         _here = current_pc_name()
         assert entry_applies_here({"target_pc": ""}), "빈 대상 PC는 전원 적용 오류"
         assert entry_applies_here({"target_pc": _here.upper()}), "대상 PC 대소문자 비교 오류"
@@ -714,13 +959,17 @@ def main():
                 state["qr_image"] = remote.get("qr_image", state.get("qr_image"))
                 state["after_close_url"] = remote.get("after_close_url", state.get("after_close_url"))
                 state["schedule"] = remote.get("schedule", state.get("schedule"))
+                state["intro_enabled"] = remote.get("intro_enabled", state.get("intro_enabled", True))
         # 일정표가 있으면 가장 이른 시각의 설정으로 미리보기 한다
         entries = [e for e in schedule_of(state) if entry_applies_here(e)]
+        first = entries[0] if entries else state
         show_qr_window(
-            entries[0] if entries else state,
+            first,
             config.get("window_title", "퇴실 QR코드"),
             int(config.get("display_seconds", 600)),
             max(0, int(config.get("close_lock_seconds", DEFAULT_CLOSE_LOCK_SECONDS))),
+            intro_for_entry(first, state) if entries else None,
+            max(0, int(config.get("close_lock_after_intro_seconds", DEFAULT_LOCK_AFTER_INTRO_SECONDS))),
         )
         return
 
