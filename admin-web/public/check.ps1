@@ -6,7 +6,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 $InstallDir = Join-Path $env:LOCALAPPDATA "qrcode-checkout"
 $StartupVbs = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\qrcode-checkout.vbs"
-$SyncUrl = "https://gist.githubusercontent.com/sungho19141935-cyber/5cd259614734afe93651c086fdcad554/raw/bootcamp_qr_config.json"
+$SyncUrl = "https://gist.githubusercontent.com/hodumaru111/5cd259614734afe93651c086fdcad554/raw/bootcamp_qr_config.json"
 
 $problems = @()
 
@@ -45,7 +45,7 @@ if ($installed) {
 }
 $latestVer = $null
 try {
-    $latestVer = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/version.json?t=$([int](Get-Date -UFormat %s))" -UseBasicParsing -TimeoutSec 10).Content |
+    $latestVer = (Invoke-WebRequest -Uri "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/version.json?t=$([int](Get-Date -UFormat %s))" -UseBasicParsing -TimeoutSec 10).Content |
                  ConvertFrom-Json | Select-Object -ExpandProperty version
 } catch {}
 

@@ -28,9 +28,9 @@ QR은 매주 바뀌므로, **관리자(본인)가 admin-web에서 QR 이미지 �
 
 | 용도 | 링크 |
 |---|---|
-| 학생용 설치 프로그램 (추천) | `https://github.com/sungho19141935-cyber/qrcode-checkout/releases/latest/download/QRcodeSetup.exe` |
-| 학생용 exe (설치 없이 바로 실행) | `https://github.com/sungho19141935-cyber/qrcode-checkout/releases/latest/download/QRcode.exe` + `config.json` |
-| 관리자용 (QR 등록/시각 설정) | `https://github.com/sungho19141935-cyber/qrcode-checkout/releases/latest/download/QRcodeAdmin.exe` |
+| 학생용 설치 프로그램 (추천) | `https://github.com/hodumaru111/qrcode-checkout/releases/latest/download/QRcodeSetup.exe` |
+| 학생용 exe (설치 없이 바로 실행) | `https://github.com/hodumaru111/qrcode-checkout/releases/latest/download/QRcode.exe` + `config.json` |
+| 관리자용 (QR 등록/시각 설정) | `https://github.com/hodumaru111/qrcode-checkout/releases/latest/download/QRcodeAdmin.exe` |
 
 **학생용 설치 프로그램(`QRcodeSetup.exe`)** 은 더블클릭하면 설치 마법사가 뜨고,
 "Windows 시작 시 자동 실행" 체크박스 하나로 부팅할 때마다 자동으로 대기 상태가 되도록
@@ -194,7 +194,7 @@ python3 main.py --test-now
 ### exe로 실행 (Python 설치 없이)
 학생용과 마찬가지로 관리자용도 고정 링크로 빌드되어 있습니다.
 
-- **관리자용 다운로드**: `https://github.com/sungho19141935-cyber/qrcode-checkout/releases/latest/download/QRcodeAdmin.exe`
+- **관리자용 다운로드**: `https://github.com/hodumaru111/qrcode-checkout/releases/latest/download/QRcodeAdmin.exe`
 
 다운로드한 `QRcodeAdmin.exe`를 더블클릭하면 아래 GUI 설명과 동일하게 동작합니다.
 (`config.json`은 필요 없습니다 — Gist ID/토큰은 프로그램 안에서 직접 입력)

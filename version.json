@@ -1,11 +1,11 @@
 {
-  "version": "1.8.0",
-  "url": "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/main.py",
-  "sha256": "07ae881c953cb10ce92856a5e524a74088b12be0f3b0835daa78d918836e4fbc",
+  "version": "1.8.1",
+  "url": "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/main.py",
+  "sha256": "818b87438d6015f231043af4c166cf2555fd45c2e05e214009792ca57e403688",
   "enabled": true,
   "assets": {
     "intro": {
-      "url": "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/assets/intro.webp",
+      "url": "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/assets/intro.webp",
       "sha256": "90e6a2d9edef0f9e9fbb63b93e6d212f825d74159bfce77f59e76d772b1d1eba",
       "bytes": 476080,
       "fps": 12

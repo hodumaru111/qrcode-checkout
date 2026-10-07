@@ -25,7 +25,7 @@ MAIN_PY = ROOT / "main.py"
 VERSION_JSON = ROOT / "version.json"
 ASSET_DIR = ROOT / "assets"
 MAX_ASSET_BYTES = 3_000_000  # main.py의 MAX_ASSET_BYTES와 같아야 한다 (넘으면 학생 PC가 거부한다)
-RAW_BASE = "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main"
+RAW_BASE = "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main"
 
 
 def main():

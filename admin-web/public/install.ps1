@@ -1,11 +1,11 @@
 # 퇴실 QR코드 프로그램 - 학생용 원클릭 설치 스크립트
 # 사용법: PowerShell에서 아래 한 줄만 실행
-#   irm https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
-$RepoRaw = "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main"
+$RepoRaw = "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main"
 $InstallDir = Join-Path $env:LOCALAPPDATA "qrcode-checkout"
 $Files = @("main.py", "requirements.txt", "config.json")
 

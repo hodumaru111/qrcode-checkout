@@ -27,10 +27,14 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 DEFAULT_UPDATE_URL = (
-    "https://raw.githubusercontent.com/sungho19141935-cyber/qrcode-checkout/main/version.json"
+    "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/version.json"
 )
+# GitHub 계정 이름 변경 이력 (예전 이름 -> 새 이름). 저장소 주소는 GitHub이 새 주소로
+# 넘겨주지만, Gist raw 주소는 계정 이름이 바뀌면 그대로 404가 난다. 이미 설치된 PC의
+# config.json(설치 스크립트가 덮어쓰지 않는다)에 남은 예전 주소를 여기서 고쳐 쓴다.
+ACCOUNT_RENAMES = {"sungho19141935-cyber": "hodumaru111"}
 DEFAULT_UPDATE_INTERVAL = 3600  # 1시간마다 확인
 MIN_MAIN_PY_BYTES = 5_000  # 이보다 작으면 잘린 응답으로 간주
 
@@ -84,6 +88,15 @@ def load_cache():
 def save_cache(data: dict):
     with open(CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def migrate_url(url):
+    """예전 GitHub 계정 이름이 들어간 주소를 새 이름으로 바꾼다. 해당 없으면 그대로."""
+    if not url:
+        return url
+    for old, new in ACCOUNT_RENAMES.items():
+        url = url.replace(f"/{old}/", f"/{new}/")
+    return url
 
 
 def fetch_remote_config(sync_url: str, timeout: int = 10) -> Optional[dict]:
@@ -713,7 +726,9 @@ def check_for_update(update_url: str) -> bool:
 
 
 def run_scheduler(config):
-    sync_url = config.get("sync_url")
+    sync_url = migrate_url(config.get("sync_url"))
+    if sync_url != config.get("sync_url"):
+        log(f"[QRcode] 동기화 주소를 바뀐 GitHub 계정 이름으로 고쳐 씁니다: {sync_url}")
     fetch_interval = int(config.get("fetch_interval_seconds", 300))
     display_seconds = int(config.get("display_seconds", 600))
     close_lock_seconds = max(0, int(config.get("close_lock_seconds", DEFAULT_CLOSE_LOCK_SECONDS)))
@@ -722,7 +737,7 @@ def run_scheduler(config):
     )
     window_title = config.get("window_title", "퇴실 QR코드")
     catchup_minutes = int(config.get("catchup_minutes", DEFAULT_CATCHUP_MINUTES))
-    update_url = config.get("update_url", DEFAULT_UPDATE_URL)
+    update_url = migrate_url(config.get("update_url", DEFAULT_UPDATE_URL))
     update_interval = int(config.get("update_check_seconds", DEFAULT_UPDATE_INTERVAL))
 
     state = load_cache()
@@ -901,6 +916,13 @@ def main():
         assert get_display_image({"checkout_url": "https://example.com"}) is not None, "퇴실 폴백 오류"
         _legacy = schedule_of({"checkout_times": ["09:00", "18:00"], "qr_image": "공용"})
         assert len(_legacy) == 2 and _legacy[1]["qr_image"] == "공용", "구 형식 호환 오류"
+        _old_url = "https://gist.githubusercontent.com/sungho19141935-cyber/abc/raw/x.json"
+        assert migrate_url(_old_url) == "https://gist.githubusercontent.com/hodumaru111/abc/raw/x.json", (
+            "예전 계정 주소 변환 오류"
+        )
+        assert migrate_url("https://example.com/a/b") == "https://example.com/a/b", "무관한 주소 변환 오류"
+        assert migrate_url(None) is None and migrate_url("") == "", "빈 주소 처리 오류"
+        assert "sungho19141935-cyber" not in DEFAULT_UPDATE_URL, "기본 업데이트 주소가 예전 계정"
         assert intro_frame_index(0.0, 12, 60) == 0, "영상 첫 프레임 오류"
         assert intro_frame_index(2.5, 12, 60) == 30, "영상 중간 프레임 오류"
         assert intro_frame_index(5.0, 12, 60) is None, "영상 종료 판정 오류"
@@ -953,7 +975,7 @@ def main():
         state.setdefault("qr_image", config.get("qr_image"))
         state.setdefault("after_close_url", config.get("after_close_url"))
         if config.get("sync_url"):
-            remote = fetch_remote_config(config["sync_url"])
+            remote = fetch_remote_config(migrate_url(config["sync_url"]))
             if remote:
                 state["checkout_url"] = remote.get("checkout_url", state.get("checkout_url", ""))
                 state["qr_image"] = remote.get("qr_image", state.get("qr_image"))
