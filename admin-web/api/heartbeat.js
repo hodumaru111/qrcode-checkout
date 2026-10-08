@@ -19,6 +19,23 @@ function clean(value, max) {
     .slice(0, max);
 }
 
+// Gist는 저장할 때마다 내부적으로 커밋을 하나씩 만든다. 거의 같은 순간에 두 저장이
+// 들어오면 파일이 달라도 한쪽이 409(Conflict)로 거부된다. 실제로 동시 6건 중 4건이
+// 409였다. 아침에 여러 대가 한꺼번에 켜지면 늘 생기는 일이라, 잠깐 쉬었다 다시 저장한다.
+const RETRY_STATUSES = new Set([409, 422, 500, 502, 503]);
+const MAX_TRIES = 8;
+
+async function patchWithRetry(url, options) {
+  let r;
+  for (let i = 0; i < MAX_TRIES; i++) {
+    r = await fetch(url, options);
+    if (r.ok || !RETRY_STATUSES.has(r.status)) return r;
+    // 서로 같은 박자로 다시 부딪치지 않도록 대기 시간을 무작위로 섞는다
+    await new Promise((res) => setTimeout(res, 300 + Math.random() * 1200));
+  }
+  return r;
+}
+
 function fileNameFor(pc) {
   // PC 이름에 한글/공백이 있어도 안전한 파일 이름. 대소문자만 다른 이름은 같은 PC로 본다.
   return PREFIX + crypto.createHash("sha1").update(pc.toLowerCase()).digest("hex").slice(0, 16) + ".json";
@@ -76,7 +93,7 @@ module.exports = async function handler(req, res) {
       sync_ok: clean(body.sync_ok, 32),
       sync_error: clean(body.sync_error, 160),
     };
-    const r = await fetch(`https://api.github.com/gists/${gistId}`, {
+    const r = await patchWithRetry(`https://api.github.com/gists/${gistId}`, {
       method: "PATCH",
       headers,
       body: JSON.stringify({ files: { [name]: { content: JSON.stringify(record) } } }),

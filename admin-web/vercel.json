@@ -9,5 +9,10 @@
         }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/heartbeat.js": {
+      "maxDuration": 30
+    }
+  }
 }
