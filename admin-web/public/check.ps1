@@ -54,7 +54,7 @@ if (-not $localVer) {
     $problems += "오래된 버전입니다. 주말에도 QR이 뜨거나 설정이 반영되지 않습니다. 재설치가 필요합니다."
 } elseif ($latestVer -and $localVer -ne $latestVer) {
     Write-Check "프로그램 버전" $false "$localVer (최신 $latestVer)"
-    $problems += "최신 버전이 아닙니다. 보통 1시간 안에 자동으로 업데이트되지만, 급하면 재설치하세요."
+    $problems += "최신 버전이 아닙니다. 켜져 있으면 1시간 안에 자동으로 업데이트되지만, 급하면 재설치하세요."
 } else {
     Write-Check "프로그램 버전" $true $(if ($localVer) { "$localVer (최신)" } else { "확인 불가" })
 }

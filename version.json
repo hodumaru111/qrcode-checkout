@@ -1,7 +1,7 @@
 {
-  "version": "1.9.1",
+  "version": "1.9.2",
   "url": "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/main.py",
-  "sha256": "4a49d6c01ba00f95d352d2d20340e2e60c3f1c789af093e7397a5e92e2941e35",
+  "sha256": "3dada588c77b4767952f45a81f7699ade9b889fa8d9eb4fc704fdc890e7ef93b",
   "enabled": true,
   "assets": {
     "intro": {

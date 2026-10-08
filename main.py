@@ -29,7 +29,7 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/version.json"
 )
@@ -37,7 +37,9 @@ DEFAULT_UPDATE_URL = (
 # 넘겨주지만, Gist raw 주소는 계정 이름이 바뀌면 그대로 404가 난다. 이미 설치된 PC의
 # config.json(설치 스크립트가 덮어쓰지 않는다)에 남은 예전 주소를 여기서 고쳐 쓴다.
 ACCOUNT_RENAMES = {"sungho19141935-cyber": "hodumaru111"}
-DEFAULT_UPDATE_INTERVAL = 3600  # 1시간마다 확인
+# 새 버전 확인 간격. 1시간이면 급한 수정이 켜져 있는 PC에 다 퍼지기까지 최대 1시간이 걸렸다.
+# version.json은 수백 바이트라 10분마다 받아도 부담이 없다 (설정은 이미 매분 받는다).
+DEFAULT_UPDATE_INTERVAL = 600
 # 관리자 페이지 '설치 현황'에 보이는 상태 보고. GitHub 계정 이름과 무관한 주소를 쓴다.
 DEFAULT_STATUS_URL = "https://qrcode-checkout.vercel.app/api/heartbeat"
 DEFAULT_STATUS_INTERVAL = 6 * 3600  # 켜질 때 한 번 + 6시간마다

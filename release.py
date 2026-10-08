@@ -6,7 +6,7 @@ main.py를 고쳐 학생 PC에 배포하려면:
     2. python release.py
     3. main.py와 version.json을 함께 커밋 & 푸시
 
-학생 프로그램은 1시간마다 version.json을 확인해서, 버전이 다르면 main.py를
+학생 프로그램은 10분마다 version.json을 확인해서, 버전이 다르면 main.py를
 내려받아 체크섬/문법/실행 검증을 모두 통과한 경우에만 교체하고 재시작한다.
 
 version.json의 "enabled"를 false로 바꾸고 푸시하면 전체 자동 업데이트가 즉시
