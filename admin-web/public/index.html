@@ -160,6 +160,14 @@
   #editBtn { margin-top: 20px; }
   .switchrow { display: flex; align-items: center; gap: 12px; margin-top: 18px; font-weight: 600; cursor: pointer; }
   .switchrow input { width: 22px; height: 22px; margin: 0; flex: none; accent-color: var(--accent); }
+  .statsum { font-size: 1rem; margin: 4px 0 12px; }
+  .statsum b { color: var(--warn); }
+  .statrow { padding: 10px 0; border-top: 1px solid var(--border); }
+  .statrow:first-of-type { border-top: none; }
+  .statrow .pc { font-weight: 700; font-size: 1.02rem; word-break: break-all; }
+  .statrow .meta { color: var(--muted); font-size: 0.92rem; margin-top: 2px; }
+  .statrow .warn { color: var(--warn); font-size: 0.92rem; margin-top: 2px; font-weight: 600; }
+  #statusRefresh { margin-top: 10px; }
   .sectionhint { font-size: 1rem; color: var(--muted); margin: -6px 0 12px; }
   .empty { font-size: 1.05rem; color: var(--muted); text-align: center; padding: 14px 0; margin: 0; }
   .addrow { width: 100%; border: 1px dashed var(--border); background: transparent; color: var(--muted); }
@@ -316,6 +324,15 @@
         <button class="ghost" id="resetBtn">취소</button>
       </div>
     </div>
+
+    <details class="panel" id="statusPanel">
+      <summary>설치 현황</summary>
+      <p class="sectionhint">학생 PC가 켜질 때와 6시간마다 보내는 기록입니다. 문제 있는 PC가 위에 옵니다.</p>
+      <div id="statusBody">펼치면 불러옵니다.</div>
+      <button class="ghost" id="statusRefresh">새로고침</button>
+      <p class="sectionhint" style="margin-top:12px">1.9.0 미만은 업데이트를 받은 뒤부터 나옵니다.
+      9월 21일 이전 설치본은 스스로 업데이트하지 못해 재설치 전까지 여기 나오지 않습니다.</p>
+    </details>
 
     <details class="panel" id="presetsPanel">
       <summary>저장된 설정 (프리셋)</summary>
@@ -908,6 +925,83 @@
       $("saveBtn").disabled = false;
     }
   });
+
+  // ---------- 설치 현황 ----------
+  function agoText(iso) {
+    const t = Date.parse(iso);
+    if (!t) return "기록 없음";
+    const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+    if (mins < 60) return mins + "분 전";
+    if (mins < 60 * 24) return Math.floor(mins / 60) + "시간 전";
+    return Math.floor(mins / 1440) + "일 전";
+  }
+
+  const STALE_MS = 3 * 24 * 60 * 60 * 1000;
+
+  function problemsOf(r, latest) {
+    const out = [];
+    if (latest && r.version && r.version !== latest) out.push("구버전 v" + r.version + " (최신 v" + latest + ")");
+    if (r.sync_error) out.push("설정을 못 받는 중: " + r.sync_error);
+    const seen = Date.parse(r.last_seen);
+    if (seen && Date.now() - seen > STALE_MS) out.push("3일 넘게 소식 없음 (꺼져 있거나 프로그램이 안 도는 중)");
+    return out;
+  }
+
+  async function refreshStatus() {
+    const box = $("statusBody");
+    box.textContent = "불러오는 중...";
+    try {
+      const data = await api("/api/status", { password });
+      const latest = data.latest;
+      const rows = (data.records || []).map((r) => ({ r, probs: problemsOf(r, latest) }));
+      rows.sort((a, b) =>
+        (b.probs.length > 0) - (a.probs.length > 0) ||
+        String(b.r.last_seen).localeCompare(String(a.r.last_seen))
+      );
+      box.innerHTML = "";
+      if (!rows.length) {
+        box.textContent = "아직 보고한 PC가 없습니다.";
+        return;
+      }
+      const n = (f) => rows.filter(f).length;
+      const sum = document.createElement("div");
+      sum.className = "statsum";
+      const bad = n((x) => x.probs.length);
+      sum.innerHTML =
+        rows.length + "대 · 최신 v" + (latest || "?") + " " + n((x) => x.r.version === latest) + "대" +
+        (bad ? " · <b>확인 필요 " + bad + "대</b>" : " · 모두 정상");
+      box.appendChild(sum);
+
+      rows.forEach(({ r, probs }) => {
+        const row = document.createElement("div");
+        row.className = "statrow";
+        const pc = document.createElement("div");
+        pc.className = "pc";
+        pc.textContent = r.pc;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent =
+          "v" + (r.version || "?") + " · " + agoText(r.last_seen) + " 확인" +
+          " · " + (r.last_shown ? "마지막 표시 " + r.last_shown : "표시 기록 없음");
+        row.appendChild(pc);
+        row.appendChild(meta);
+        probs.forEach((t) => {
+          const w = document.createElement("div");
+          w.className = "warn";
+          w.textContent = "⚠ " + t;
+          row.appendChild(w);
+        });
+        box.appendChild(row);
+      });
+    } catch (e) {
+      box.textContent = "불러오지 못했습니다: " + e.message;
+    }
+  }
+
+  $("statusPanel").addEventListener("toggle", () => {
+    if ($("statusPanel").open) refreshStatus();
+  });
+  $("statusRefresh").addEventListener("click", refreshStatus);
 
   // ---------- 프리셋 ----------
   function renderPresetOptions() {
