@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import socket
 import subprocess
@@ -28,7 +29,7 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/version.json"
 )
@@ -899,7 +900,10 @@ def run_scheduler(config):
             # 설정 받기 결과까지 담아 보고한다 (켜질 때 + 6시간마다)
             if status_url and now_ts - last_status >= status_interval:
                 last_status = now_ts
-                post_status(status_url, build_status(state))
+                if not post_status(status_url, build_status(state)):
+                    # 실패하면 6시간을 기다리지 않고 3~7분 뒤 다시 보낸다. 시점을 섞어야
+                    # 함께 실패한 PC들이 같은 순간에 다시 몰려 또 충돌하지 않는다.
+                    last_status = now_ts - status_interval + random.randint(180, 420)
 
             now = datetime.now()
             now_hm = now.strftime("%H:%M")
