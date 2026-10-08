@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -27,7 +28,7 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.8.1"
+VERSION = "1.9.0"
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/version.json"
 )
@@ -36,6 +37,9 @@ DEFAULT_UPDATE_URL = (
 # config.json(설치 스크립트가 덮어쓰지 않는다)에 남은 예전 주소를 여기서 고쳐 쓴다.
 ACCOUNT_RENAMES = {"sungho19141935-cyber": "hodumaru111"}
 DEFAULT_UPDATE_INTERVAL = 3600  # 1시간마다 확인
+# 관리자 페이지 '설치 현황'에 보이는 상태 보고. GitHub 계정 이름과 무관한 주소를 쓴다.
+DEFAULT_STATUS_URL = "https://qrcode-checkout.vercel.app/api/heartbeat"
+DEFAULT_STATUS_INTERVAL = 6 * 3600  # 켜질 때 한 번 + 6시간마다
 MIN_MAIN_PY_BYTES = 5_000  # 이보다 작으면 잘린 응답으로 간주
 
 DEFAULT_CHECKOUT_TIME = "18:00"
@@ -99,6 +103,10 @@ def migrate_url(url):
     return url
 
 
+# 마지막 설정 받기 결과. 상태 보고에 실어 보내, 관리자가 "설정을 못 받는 PC"를 알 수 있게 한다.
+SYNC_STATUS = {"error": ""}
+
+
 def fetch_remote_config(sync_url: str, timeout: int = 10) -> Optional[dict]:
     """관리자가 갱신하는 중앙 설정(Gist 등)을 가져온다. 실패하면 None."""
     try:
@@ -114,10 +122,15 @@ def fetch_remote_config(sync_url: str, timeout: int = 10) -> Optional[dict]:
             "checkout_time" not in data or not ("qr_image" in data or "checkout_url" in data)
         ):
             log("[QRcode] 원격 설정에 checkout_time과 qr_image(또는 checkout_url)가 필요합니다. 무시합니다.")
+            SYNC_STATUS["error"] = "설정 형식 오류"
             return None
+        SYNC_STATUS["error"] = ""
         return data
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+    except Exception as e:
+        # 예전에는 URLError 등 일부만 잡아서, 서버가 응답 도중 연결을 끊으면
+        # (RemoteDisconnected, IncompleteRead) 예외가 루프 밖으로 나가 프로그램이 종료됐다.
         log(f"[QRcode] 원격 설정 갱신 실패 (마지막 캐시 사용): {e}")
+        SYNC_STATUS["error"] = f"{type(e).__name__}: {e}"[:160]
         return None
 
 
@@ -542,7 +555,7 @@ def sync_assets(manifest: dict) -> None:
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = resp.read(MAX_ASSET_BYTES + 1)  # 상한을 넘는 응답은 끝까지 읽지 않는다
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except Exception as e:  # 응답 도중 끊김(IncompleteRead) 등도 여기서 멈춘다
         log(f"[QRcode] 인트로 영상 내려받기 실패 (무시): {e}")
         return
 
@@ -560,6 +573,37 @@ def sync_assets(manifest: dict) -> None:
         log(f"[QRcode] 인트로 영상 저장 ({len(data) // 1024}KB, {fps}fps)")
     except OSError as e:
         log(f"[QRcode] 인트로 영상 저장 실패 (무시): {e}")
+
+
+def build_status(state: dict) -> dict:
+    """관리자 '설치 현황'에 보낼 내용. 화면이나 파일 내용은 보내지 않는다."""
+    return {
+        "app": "qrcode-checkout",
+        "pc": current_pc_name()[:64],
+        "version": VERSION,
+        "last_shown": (state.get("last_shown") or "")[:32],
+        "times": ", ".join(e["time"] for e in schedule_of(state))[:120],
+        "sync_ok": (state.get("last_sync_ok") or "")[:32],
+        "sync_error": (SYNC_STATUS.get("error") or "")[:160],
+    }
+
+
+def post_status(status_url: str, payload: dict, timeout: int = 10) -> bool:
+    """상태를 보고한다. 실패해도 프로그램 동작에는 영향이 없다."""
+    try:
+        req = urllib.request.Request(
+            status_url,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ok = resp.status == 200
+        log("[QRcode] 상태 보고 완료" if ok else f"[QRcode] 상태 보고 응답 {resp.status}")
+        return ok
+    except Exception as e:  # 부가 기능이므로 어떤 실패든 넘어간다
+        log(f"[QRcode] 상태 보고 실패 (무시): {e}")
+        return False
 
 
 def fetch_json(url: str, timeout: int = 10):
@@ -664,7 +708,7 @@ def check_for_update(update_url: str) -> bool:
     """새 버전이 있으면 검증 후 교체한다. 교체했으면 True (호출자가 재시작)."""
     try:
         manifest = fetch_json(update_url)
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError) as e:
+    except Exception as e:
         log(f"[QRcode] 업데이트 확인 실패 (무시하고 계속): {e}")
         return False
 
@@ -694,7 +738,7 @@ def check_for_update(update_url: str) -> bool:
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             source = resp.read()
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except Exception as e:
         log(f"[QRcode] 새 버전 내려받기 실패: {e}")
         return False
 
@@ -725,6 +769,27 @@ def check_for_update(update_url: str) -> bool:
     return True
 
 
+def shown_today_from_log(today: str) -> set:
+    """로그에서 오늘 이미 띄운 퇴실 시각을 찾는다.
+
+    1.9.0 전 버전은 '오늘 띄운 시각'을 파일에 남기지 않았다. 그 버전에서 오늘 QR을 띄운 뒤
+    1.9.0으로 업데이트되어 재시작하면, 기록이 없어 따라잡기 시간 안에 QR이 한 번 더 뜬다.
+    표시할 때마다 남기는 로그 줄("... (설정 17:50) - QR 화면 표시")은 예전 버전부터 같아서
+    거기서 복원한다.
+    """
+    try:
+        text = LOG_PATH.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    found = set()
+    for line in text.splitlines():
+        if line.startswith(today) and "화면 표시" in line:
+            m = re.search(r"\(설정 (\d{2}:\d{2})\)", line)
+            if m:
+                found.add(m.group(1))
+    return found
+
+
 def run_scheduler(config):
     sync_url = migrate_url(config.get("sync_url"))
     if sync_url != config.get("sync_url"):
@@ -739,6 +804,8 @@ def run_scheduler(config):
     catchup_minutes = int(config.get("catchup_minutes", DEFAULT_CATCHUP_MINUTES))
     update_url = migrate_url(config.get("update_url", DEFAULT_UPDATE_URL))
     update_interval = int(config.get("update_check_seconds", DEFAULT_UPDATE_INTERVAL))
+    status_url = config.get("status_url", DEFAULT_STATUS_URL)
+    status_interval = int(config.get("status_interval_seconds", DEFAULT_STATUS_INTERVAL))
 
     state = load_cache()
     state.setdefault("checkout_url", config.get("checkout_url", ""))
@@ -751,10 +818,19 @@ def run_scheduler(config):
     state.setdefault("active_days", config.get("active_days", DEFAULT_ACTIVE_DAYS))
     state.setdefault("after_close_url", config.get("after_close_url"))
 
-    triggered_date = None  # done_today가 어느 날짜의 기록인지
-    done_today = set()  # 오늘 이미 띄운 시각들
+    # 오늘 이미 띄운 시각은 cache.json에 남긴다. 메모리에만 두면 업데이트로 재시작하거나
+    # 퇴실 후 재부팅했을 때 기록이 사라져, 따라잡기 시간 안이면 QR이 한 번 더 뜬다.
+    triggered_date = state.get("done_date")  # done_today가 어느 날짜의 기록인지
+    done_today = set(state.get("done_times") or []) if triggered_date else set()  # 오늘 이미 띄운 시각들
+    _today = datetime.now().strftime("%Y-%m-%d")
+    if triggered_date != _today:
+        recovered = shown_today_from_log(_today)
+        if recovered:
+            triggered_date, done_today = _today, recovered
+            log(f"[QRcode] 오늘 이미 띄운 시각을 로그에서 확인: {', '.join(sorted(recovered))} (다시 띄우지 않음)")
     last_fetch = 0.0
     last_update_check = 0.0
+    last_status = 0.0  # 0이면 켜지자마자(첫 설정 받기 직후) 한 번 보고한다
     synced_once = False
 
     log(
@@ -766,89 +842,109 @@ def run_scheduler(config):
         log(f"[QRcode] 중앙 설정 동기화 사용: {sync_url} ({fetch_interval}초마다 갱신)")
 
     while True:
-        now_ts = time.time()
+        # 한 바퀴에서 어떤 예외가 나도 기록만 하고 다음 바퀴로 넘어간다.
+        # 여기서 프로그램이 죽으면 다음 재부팅까지 QR이 안 뜨고, 학생은 알 방법이 없다.
+        try:
+            now_ts = time.time()
 
-        # QR을 띄우는 중에 교체가 끼어들지 않도록, 표시 직전이 아닐 때만 확인한다
-        if update_url and now_ts - last_update_check >= update_interval:
-            last_update_check = now_ts
-            if check_for_update(update_url):
-                restart_self()
+            # QR을 띄우는 중에 교체가 끼어들지 않도록, 표시 직전이 아닐 때만 확인한다
+            if update_url and now_ts - last_update_check >= update_interval:
+                last_update_check = now_ts
+                if check_for_update(update_url):
+                    restart_self()
 
-        if sync_url and now_ts - last_fetch >= fetch_interval:
-            last_fetch = now_ts
-            remote = fetch_remote_config(sync_url)
-            if remote:
-                # 관리자가 퇴실 시각을 새로 저장했다면 오늘치를 다시 준비한다.
-                # 이걸 안 하면 "오늘 이미 띄웠음" 표시 때문에, 시각을 바꿔 저장해도
-                # 그날은 아무리 기다려도 안 뜬다 (관리자 입장에선 고장으로 보인다).
-                new_times = [e["time"] for e in schedule_of(remote)]
-                if new_times and new_times != [e["time"] for e in schedule_of(state)]:
-                    if done_today:
+            if sync_url and now_ts - last_fetch >= fetch_interval:
+                last_fetch = now_ts
+                remote = fetch_remote_config(sync_url)
+                if remote:
+                    # 관리자가 퇴실 시각을 새로 저장했다면 오늘치를 다시 준비한다.
+                    # 이걸 안 하면 "오늘 이미 띄웠음" 표시 때문에, 시각을 바꿔 저장해도
+                    # 그날은 아무리 기다려도 안 뜬다 (관리자 입장에선 고장으로 보인다).
+                    new_times = [e["time"] for e in schedule_of(remote)]
+                    if new_times and new_times != [e["time"] for e in schedule_of(state)]:
+                        if done_today:
+                            log(
+                                f"[QRcode] 퇴실 시각이 {', '.join(new_times)}(으)로 변경되어 "
+                                "오늘 표시를 다시 준비합니다."
+                            )
+                        done_today = set()
+                        state["done_times"] = []  # 아래 save_cache에서 함께 저장된다
+                    if not synced_once:
+                        synced_once = True
+                        log(f"[QRcode] 중앙 설정 첫 동기화 성공 (시각 {remote.get('checkout_time')})")
+                    if remote.get("checkout_time") != state.get("checkout_time") or remote.get(
+                        "qr_image"
+                    ) != state.get("qr_image") or remote.get("checkout_url") != state.get(
+                        "checkout_url"
+                    ) or remote.get("active_days") != state.get(
+                        "active_days"
+                    ) or remote.get("after_close_url") != state.get("after_close_url"):
                         log(
-                            f"[QRcode] 퇴실 시각이 {', '.join(new_times)}(으)로 변경되어 "
-                            "오늘 표시를 다시 준비합니다."
+                            "[QRcode] 설정 갱신됨 -> 시각: "
+                            f"{', '.join(e['time'] for e in schedule_of(remote)) or '없음'}, "
+                            f"요일: {remote.get('active_days', state['active_days'])}"
                         )
-                    done_today = set()
-                if not synced_once:
-                    synced_once = True
-                    log(f"[QRcode] 중앙 설정 첫 동기화 성공 (시각 {remote.get('checkout_time')})")
-                if remote.get("checkout_time") != state.get("checkout_time") or remote.get(
-                    "qr_image"
-                ) != state.get("qr_image") or remote.get("checkout_url") != state.get(
-                    "checkout_url"
-                ) or remote.get("active_days") != state.get(
-                    "active_days"
-                ) or remote.get("after_close_url") != state.get("after_close_url"):
-                    log(
-                        "[QRcode] 설정 갱신됨 -> 시각: "
-                        f"{', '.join(e['time'] for e in schedule_of(remote)) or '없음'}, "
-                        f"요일: {remote.get('active_days', state['active_days'])}"
+                    state["checkout_url"] = remote.get("checkout_url", state.get("checkout_url", ""))
+                    state["qr_image"] = remote.get("qr_image", state.get("qr_image"))
+                    state["checkout_time"] = remote.get("checkout_time", state["checkout_time"])
+                    state["checkout_times"] = remote.get("checkout_times", state.get("checkout_times"))
+                    state["schedule"] = remote.get("schedule", state.get("schedule"))
+                    state["intro_enabled"] = remote.get("intro_enabled", state.get("intro_enabled", True))
+                    state["base_qr_image"] = remote.get("base_qr_image", state.get("base_qr_image"))
+                    state["active_days"] = remote.get("active_days", state["active_days"])
+                    state["after_close_url"] = remote.get("after_close_url", state.get("after_close_url"))
+                    state["last_sync_ok"] = datetime.now().isoformat(timespec="seconds")
+                    save_cache(state)
+
+            # 설정 받기 결과까지 담아 보고한다 (켜질 때 + 6시간마다)
+            if status_url and now_ts - last_status >= status_interval:
+                last_status = now_ts
+                post_status(status_url, build_status(state))
+
+            now = datetime.now()
+            now_hm = now.strftime("%H:%M")
+            today = now.strftime("%Y-%m-%d")
+
+            today_key = WEEKDAY_KEYS[now.weekday()]
+            # 설정이 비어 있거나 null로 오면 기본값(월~금)을 쓴다.
+            # 그냥 두면 None으로 비교하다 프로그램이 죽는다.
+            active_days = state.get("active_days") or DEFAULT_ACTIVE_DAYS
+            is_active_day = today_key in active_days
+
+            if triggered_date != today:  # 날짜가 바뀌면 오늘치를 새로 시작
+                triggered_date = today
+                done_today = set()
+
+            if is_active_day:
+                entries = [e for e in schedule_of(state) if entry_applies_here(e)]
+                times = [e["time"] for e in entries]
+                target = due_time(now, times, done_today, catchup_minutes)
+                if target:
+                    # 한꺼번에 여러 시각을 놓쳤어도 창은 하나만 띄우고, 지나간 것들은
+                    # 오늘치를 쓴 것으로 처리한다 (창이 연달아 여러 개 뜨지 않도록).
+                    done_today.update(t for t in times if parse_hhmm(t) <= parse_hhmm(target))
+                    entry = next(e for e in entries if e["time"] == target)
+                    label = "공지" if entry.get("kind") == "notice" else "QR"
+                    if entry.get("target_pc"):
+                        label += f" (지정: {entry['target_pc']})"
+                    intro = intro_for_entry(entry, state)
+                    if intro:
+                        label += " + 영상"
+                    log(f"[QRcode] {now_hm} (설정 {target}) - {label} 화면 표시")
+                    # 관리자 현황 화면에서 "이 PC가 실제로 QR을 봤는지"를 보기 위해 남긴다
+                    state["last_shown"] = f"{today} {now_hm}"
+                    state["done_date"] = today
+                    state["done_times"] = sorted(done_today)
+                    save_cache(state)
+                    # 그 시각에 등록된 QR/링크로 띄운다 (시각마다 다를 수 있다)
+                    show_qr_window(
+                        entry, window_title, display_seconds, close_lock_seconds, intro, lock_after_intro
                     )
-                state["checkout_url"] = remote.get("checkout_url", state.get("checkout_url", ""))
-                state["qr_image"] = remote.get("qr_image", state.get("qr_image"))
-                state["checkout_time"] = remote.get("checkout_time", state["checkout_time"])
-                state["checkout_times"] = remote.get("checkout_times", state.get("checkout_times"))
-                state["schedule"] = remote.get("schedule", state.get("schedule"))
-                state["intro_enabled"] = remote.get("intro_enabled", state.get("intro_enabled", True))
-                state["base_qr_image"] = remote.get("base_qr_image", state.get("base_qr_image"))
-                state["active_days"] = remote.get("active_days", state["active_days"])
-                state["after_close_url"] = remote.get("after_close_url", state.get("after_close_url"))
-                save_cache(state)
 
-        now = datetime.now()
-        now_hm = now.strftime("%H:%M")
-        today = now.strftime("%Y-%m-%d")
+        except Exception:
+            import traceback
 
-        today_key = WEEKDAY_KEYS[now.weekday()]
-        # 설정이 비어 있거나 null로 오면 기본값(월~금)을 쓴다.
-        # 그냥 두면 None으로 비교하다 프로그램이 죽는다.
-        active_days = state.get("active_days") or DEFAULT_ACTIVE_DAYS
-        is_active_day = today_key in active_days
-
-        if triggered_date != today:  # 날짜가 바뀌면 오늘치를 새로 시작
-            triggered_date = today
-            done_today = set()
-
-        if is_active_day:
-            entries = [e for e in schedule_of(state) if entry_applies_here(e)]
-            times = [e["time"] for e in entries]
-            target = due_time(now, times, done_today, catchup_minutes)
-            if target:
-                # 한꺼번에 여러 시각을 놓쳤어도 창은 하나만 띄우고, 지나간 것들은
-                # 오늘치를 쓴 것으로 처리한다 (창이 연달아 여러 개 뜨지 않도록).
-                done_today.update(t for t in times if parse_hhmm(t) <= parse_hhmm(target))
-                entry = next(e for e in entries if e["time"] == target)
-                label = "공지" if entry.get("kind") == "notice" else "QR"
-                if entry.get("target_pc"):
-                    label += f" (지정: {entry['target_pc']})"
-                intro = intro_for_entry(entry, state)
-                if intro:
-                    label += " + 영상"
-                log(f"[QRcode] {now_hm} (설정 {target}) - {label} 화면 표시")
-                # 그 시각에 등록된 QR/링크로 띄운다 (시각마다 다를 수 있다)
-                show_qr_window(
-                    entry, window_title, display_seconds, close_lock_seconds, intro, lock_after_intro
-                )
+            log("[QRcode] 처리 중 오류 (계속 동작합니다):\n" + traceback.format_exc())
 
         time.sleep(15)
 
@@ -923,6 +1019,16 @@ def main():
         assert migrate_url("https://example.com/a/b") == "https://example.com/a/b", "무관한 주소 변환 오류"
         assert migrate_url(None) is None and migrate_url("") == "", "빈 주소 처리 오류"
         assert "sungho19141935-cyber" not in DEFAULT_UPDATE_URL, "기본 업데이트 주소가 예전 계정"
+        _st = build_status({"schedule": [{"time": "18:00"}], "last_shown": "2026-01-01 18:00",
+                            "last_sync_ok": "2026-01-01T17:00:00"})
+        assert _st["app"] == "qrcode-checkout" and _st["version"] == VERSION, "상태 보고 기본값 오류"
+        assert _st["times"] == "18:00" and _st["sync_ok"].startswith("2026"), "상태 보고 내용 오류"
+        assert set(_st) == {"app", "pc", "version", "last_shown", "times", "sync_ok", "sync_error"}, (
+            "상태 보고에 정해진 항목 외의 값이 들어감"
+        )
+        assert re.search(r"\(설정 (\d{2}:\d{2})\)", "2026-01-01 17:50:03 [QRcode] 17:50 (설정 17:50) - QR 화면 표시").group(1) == "17:50", (
+            "로그 복원 패턴 오류"
+        )
         assert intro_frame_index(0.0, 12, 60) == 0, "영상 첫 프레임 오류"
         assert intro_frame_index(2.5, 12, 60) == 30, "영상 중간 프레임 오류"
         assert intro_frame_index(5.0, 12, 60) is None, "영상 종료 판정 오류"

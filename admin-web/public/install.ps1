@@ -90,3 +90,6 @@ Write-Host ""
 Write-Host "지금 바로 백그라운드 대기를 시작합니다..."
 Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsPath`""
 Write-Host "완료! 컴퓨터를 재부팅해도 자동으로 다시 시작됩니다."
+Write-Host ""
+Write-Host "※ 설치 현황 확인을 위해 이 PC의 컴퓨터 이름, 프로그램 버전, 설정 수신 여부가" -ForegroundColor DarkGray
+Write-Host "   켜질 때와 6시간마다 매니저에게 전송됩니다. (화면 내용이나 개인 파일은 보내지 않습니다)" -ForegroundColor DarkGray
