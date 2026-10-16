@@ -29,7 +29,7 @@ LOG_PATH = Path(__file__).parent / "qrcode.log"
 LOG_MAX_BYTES = 512_000
 BACKUP_PATH = Path(__file__).parent / "main.py.bak"
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/hodumaru111/qrcode-checkout/main/version.json"
 )
@@ -486,14 +486,42 @@ def schedule_of(state: dict) -> list:
     return [by_key[k] for k in sorted(by_key, key=lambda k: (parse_hhmm(k[0]), k[1]))]
 
 
-def due_time(now: datetime, times: list, done_today: set, catchup_minutes: int) -> Optional[str]:
-    """지금 띄워야 할 시각을 고른다. 없으면 None.
+def entry_key(entry: dict) -> str:
+    """'오늘 띄웠음'을 기록할 때 쓰는 항목 이름.
 
-    여러 시각을 한꺼번에 놓친 경우(노트북을 오래 꺼둔 경우) 창을 여러 개 띄우지 않고
-    가장 최근에 지난 것 하나만 띄운다. 나머지는 호출한 쪽에서 소진 처리한다.
+    전원 대상은 시각만("17:50"), PC 지정 공지는 "18:00@pc이름". 1.9.2까지는 시각만
+    기록했기 때문에, 전원 대상 항목은 예전 기록(cache.json)과 그대로 맞는다.
     """
-    candidates = [t for t in times if t not in done_today and should_trigger(now, t, catchup_minutes)]
-    return candidates[-1] if candidates else None
+    target = (entry.get("target_pc") or "").strip().lower()
+    return f"{entry['time']}@{target}" if target else entry["time"]
+
+
+def next_to_show(now: datetime, entries: list, done_today: set, catchup_minutes: int):
+    """지금 띄울 항목 하나와, 띄웠다고 기록할 항목 이름들을 돌려준다. 없으면 (None, set()).
+
+    오늘 띄운 기록을 항목 단위로 비교하므로, 관리자가 공지를 추가하거나 고쳐도 이미 띄운
+    퇴실 QR은 다시 뜨지 않는다. 퇴실 시각을 바꾸면 새 시각은 아직 안 띄운 항목이 되어
+    그 시각에 다시 뜬다 (시각을 바꿔 저장했는데 안 뜬다는 일이 없도록).
+
+    노트북을 오래 꺼둬 여러 개를 한꺼번에 놓쳤으면 창이 줄줄이 뜨지 않게 종류별로 가장
+    최근 것만 띄운다. 종류를 나누는 건 뒤 시각의 공지 때문에 퇴실 QR이 건너뛰어지지 않게
+    하기 위해서다. 둘 다 남았으면 이른 것(같으면 퇴실 QR)부터, 다음 바퀴에 나머지를 띄운다.
+    """
+    pending = [
+        e for e in entries
+        if entry_key(e) not in done_today and should_trigger(now, e["time"], catchup_minutes)
+    ]
+    if not pending:
+        return None, set()
+    latest = {}
+    for e in pending:  # schedule_of가 시각순으로 정렬해 둔다
+        latest[e["kind"]] = e
+    chosen = min(latest.values(), key=lambda e: (parse_hhmm(e["time"]), e["kind"] != "checkout"))
+    skipped = {
+        entry_key(e) for e in pending
+        if e["kind"] == chosen["kind"] and parse_hhmm(e["time"]) < parse_hhmm(chosen["time"])
+    }
+    return chosen, skipped | {entry_key(chosen)}
 
 
 def should_trigger(now: datetime, checkout_time: str, catchup_minutes: int) -> bool:
@@ -772,8 +800,12 @@ def check_for_update(update_url: str) -> bool:
     return True
 
 
+# 표시할 때 남기는 로그 줄: "... 18:00 (설정 18:00) - 공지 (지정: PC이름) 화면 표시"
+SHOWN_LOG_PATTERN = re.compile(r"\(설정 (\d{2}:\d{2})\) - \S+(?: \(지정: ([^)]*)\))?")
+
+
 def shown_today_from_log(today: str) -> set:
-    """로그에서 오늘 이미 띄운 퇴실 시각을 찾는다.
+    """로그에서 오늘 이미 띄운 항목(entry_key)을 찾는다.
 
     1.9.0 전 버전은 '오늘 띄운 시각'을 파일에 남기지 않았다. 그 버전에서 오늘 QR을 띄운 뒤
     1.9.0으로 업데이트되어 재시작하면, 기록이 없어 따라잡기 시간 안에 QR이 한 번 더 뜬다.
@@ -787,9 +819,9 @@ def shown_today_from_log(today: str) -> set:
     found = set()
     for line in text.splitlines():
         if line.startswith(today) and "화면 표시" in line:
-            m = re.search(r"\(설정 (\d{2}:\d{2})\)", line)
+            m = SHOWN_LOG_PATTERN.search(line)
             if m:
-                found.add(m.group(1))
+                found.add(entry_key({"time": m.group(1), "target_pc": m.group(2) or ""}))
     return found
 
 
@@ -824,7 +856,7 @@ def run_scheduler(config):
     # 오늘 이미 띄운 시각은 cache.json에 남긴다. 메모리에만 두면 업데이트로 재시작하거나
     # 퇴실 후 재부팅했을 때 기록이 사라져, 따라잡기 시간 안이면 QR이 한 번 더 뜬다.
     triggered_date = state.get("done_date")  # done_today가 어느 날짜의 기록인지
-    done_today = set(state.get("done_times") or []) if triggered_date else set()  # 오늘 이미 띄운 시각들
+    done_today = set(state.get("done_times") or []) if triggered_date else set()  # 오늘 이미 띄운 항목(entry_key)
     _today = datetime.now().strftime("%Y-%m-%d")
     if triggered_date != _today:
         recovered = shown_today_from_log(_today)
@@ -860,18 +892,19 @@ def run_scheduler(config):
                 last_fetch = now_ts
                 remote = fetch_remote_config(sync_url)
                 if remote:
-                    # 관리자가 퇴실 시각을 새로 저장했다면 오늘치를 다시 준비한다.
-                    # 이걸 안 하면 "오늘 이미 띄웠음" 표시 때문에, 시각을 바꿔 저장해도
-                    # 그날은 아무리 기다려도 안 뜬다 (관리자 입장에선 고장으로 보인다).
-                    new_times = [e["time"] for e in schedule_of(remote)]
-                    if new_times and new_times != [e["time"] for e in schedule_of(state)]:
-                        if done_today:
-                            log(
-                                f"[QRcode] 퇴실 시각이 {', '.join(new_times)}(으)로 변경되어 "
-                                "오늘 표시를 다시 준비합니다."
-                            )
-                        done_today = set()
-                        state["done_times"] = []  # 아래 save_cache에서 함께 저장된다
+                    # 예전에는 시각 목록이 바뀌면 오늘 기록을 통째로 지웠다. 그러면 누군가에게
+                    # 공지를 하나 추가하기만 해도 전원에게 퇴실 QR이 한 번 더 떴다. 이제는
+                    # 항목 단위로 기록하므로 지울 필요가 없다 (next_to_show 참고).
+                    # 퇴실 시각이 바뀐 경우만, 다시 뜨는 이유를 로그로 남긴다.
+                    def checkout_times(src):
+                        return [e["time"] for e in schedule_of(src) if e["kind"] == "checkout"]
+
+                    new_checkout = checkout_times(remote)
+                    if done_today and new_checkout and new_checkout != checkout_times(state):
+                        log(
+                            f"[QRcode] 퇴실 시각이 {', '.join(new_checkout)}(으)로 변경되어 "
+                            "오늘 그 시각에 다시 띄웁니다."
+                        )
                     if not synced_once:
                         synced_once = True
                         log(f"[QRcode] 중앙 설정 첫 동기화 성공 (시각 {remote.get('checkout_time')})")
@@ -923,13 +956,10 @@ def run_scheduler(config):
 
             if is_active_day:
                 entries = [e for e in schedule_of(state) if entry_applies_here(e)]
-                times = [e["time"] for e in entries]
-                target = due_time(now, times, done_today, catchup_minutes)
-                if target:
-                    # 한꺼번에 여러 시각을 놓쳤어도 창은 하나만 띄우고, 지나간 것들은
-                    # 오늘치를 쓴 것으로 처리한다 (창이 연달아 여러 개 뜨지 않도록).
-                    done_today.update(t for t in times if parse_hhmm(t) <= parse_hhmm(target))
-                    entry = next(e for e in entries if e["time"] == target)
+                entry, shown_keys = next_to_show(now, entries, done_today, catchup_minutes)
+                if entry:
+                    done_today.update(shown_keys)
+                    target = entry["time"]
                     label = "공지" if entry.get("kind") == "notice" else "QR"
                     if entry.get("target_pc"):
                         label += f" (지정: {entry['target_pc']})"
@@ -983,10 +1013,29 @@ def main():
         assert normalize_times(["18:00", "09:00"]) == ["09:00", "18:00"], "시각 목록 정렬 오류"
         assert normalize_times("이상한값") == [], "잘못된 시각 처리 오류"
         assert times_of({"checkout_time": "18:00"}) == ["18:00"], "구 설정 호환 오류"
-        _t = ["09:00", "18:00"]
-        assert due_time(datetime(2026, 1, 1, 18, 0), _t, set(), 120) == "18:00", "시각 선택 오류"
-        assert due_time(datetime(2026, 1, 1, 9, 0), _t, set(), 120) == "09:00", "시각 선택 오류"
-        assert due_time(datetime(2026, 1, 1, 18, 0), _t, {"18:00"}, 120) is None, "중복 표시 오류"
+        _at = lambda h, m: datetime(2026, 1, 1, h, m)  # noqa: E731
+        _ck = {"time": "17:50", "kind": "checkout", "target_pc": ""}
+        _nt_me = {"time": "17:55", "kind": "notice", "target_pc": "ME"}
+        _nt_all = {"time": "18:00", "kind": "notice", "target_pc": ""}
+        assert entry_key(_ck) == "17:50" and entry_key(_nt_me) == "17:55@me", "항목 이름 오류"
+        _e, _k = next_to_show(_at(17, 50), [_ck], set(), 120)
+        assert _e is _ck and _k == {"17:50"}, "퇴실 선택 오류"
+        assert next_to_show(_at(17, 56), [_ck], {"17:50"}, 120)[0] is None, "중복 표시 오류"
+        # 공지가 추가돼도 이미 띄운 퇴실 QR은 다시 뜨지 않고, 공지만 뜬다
+        _e, _k = next_to_show(_at(17, 56), [_ck, _nt_me], {"17:50"}, 120)
+        assert _e is _nt_me and _k == {"17:55@me"}, "공지 추가 시 퇴실 재표시 오류"
+        # 퇴실 시각을 바꾸면 새 시각에 다시 뜬다
+        _moved = dict(_ck, time="17:58")
+        assert next_to_show(_at(17, 58), [_moved], {"17:50"}, 120)[0] is _moved, "시각 변경 재표시 오류"
+        # 오래 꺼져 있다 켜지면: 뒤 시각 공지 때문에 퇴실 QR이 건너뛰어지지 않는다
+        _e, _k = next_to_show(_at(18, 5), [_ck, _nt_all], set(), 120)
+        assert _e is _ck and _k == {"17:50"}, "공지가 퇴실 QR을 가림"
+        _e, _k = next_to_show(_at(18, 5), [_ck, _nt_all], {"17:50"}, 120)
+        assert _e is _nt_all, "퇴실 다음 공지 표시 오류"
+        # 같은 종류를 여러 개 놓쳤으면 마지막 것 하나만
+        _ck2 = dict(_ck, time="18:01")
+        _e, _k = next_to_show(_at(18, 5), [_ck, _ck2], set(), 120)
+        assert _e is _ck2 and _k == {"17:50", "18:01"}, "놓친 항목 정리 오류"
         _sched = schedule_of({
             "schedule": [
                 {"time": "18:00", "qr_image": "B", "after_close_url": "b"},
@@ -1032,9 +1081,10 @@ def main():
         assert set(_st) == {"app", "pc", "version", "last_shown", "times", "sync_ok", "sync_error"}, (
             "상태 보고에 정해진 항목 외의 값이 들어감"
         )
-        assert re.search(r"\(설정 (\d{2}:\d{2})\)", "2026-01-01 17:50:03 [QRcode] 17:50 (설정 17:50) - QR 화면 표시").group(1) == "17:50", (
-            "로그 복원 패턴 오류"
-        )
+        _m = SHOWN_LOG_PATTERN.search("2026-01-01 17:50:03 [QRcode] 17:50 (설정 17:50) - QR + 영상 화면 표시")
+        assert _m and _m.group(1) == "17:50" and not _m.group(2), "로그 복원 패턴 오류"
+        _m = SHOWN_LOG_PATTERN.search("2026-01-01 18:00:03 [QRcode] 18:00 (설정 18:00) - 공지 (지정: 노희주) 화면 표시")
+        assert _m and _m.group(1) == "18:00" and _m.group(2) == "노희주", "지정 공지 로그 복원 오류"
         assert intro_frame_index(0.0, 12, 60) == 0, "영상 첫 프레임 오류"
         assert intro_frame_index(2.5, 12, 60) == 30, "영상 중간 프레임 오류"
         assert intro_frame_index(5.0, 12, 60) is None, "영상 종료 판정 오류"
